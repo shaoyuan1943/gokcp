@@ -36,7 +36,7 @@ type KCP struct {
 	fastResendACK, fastACKLimit       uint32
 	nocwnd, streamMode                bool
 	outputCallback                    OutputCallback
-	mdev, mdevMax, rttSeq             uint32
+	mdev, mdevMax, rttSN              uint32
 }
 
 var (
@@ -246,6 +246,47 @@ func (kcp *KCP) updateACK(rtt uint32) {
 	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MAX)
 }
 
-func (kcp *KCP) updateACK2(rtt int32) {
+func (kcp *KCP) updateACK2(rtt uint32) {
+	srtt := kcp.rxSRTT
+	m := rtt
+	if kcp.rxSRTT == 0 {
+		srtt = uint32(m << 3)
+		kcp.mdev = uint32(m << 1)
+		kcp.rxRTTVal = max(kcp.mdev, KCP_RTO_MIN)
+		kcp.mdevMax = kcp.rxRTTVal
+		kcp.rttSN = kcp.sendNext
+	} else {
+		m -= srtt >> 3
+		srtt += m
+		if m < 0 {
+			m = -m
+			m -= (kcp.mdev >> 2)
+			if m > 0 {
+				m >>= 3
+			}
+		} else {
+			m -= (kcp.mdev >> 2)
+		}
 
+		kcp.mdev += m
+		if kcp.mdev > kcp.mdevMax {
+			kcp.mdevMax = kcp.mdev
+			if kcp.mdevMax > kcp.rxRTTVal {
+				kcp.rxRTTVal = kcp.mdevMax
+			}
+
+			if kcp.sendUNA > kcp.rttSN {
+				if kcp.mdevMax < kcp.rxRTTVal {
+					kcp.rxRTTVal -= (kcp.rxRTTVal - kcp.mdevMax) >> 2
+				}
+
+				kcp.rttSN = kcp.sendNext
+				kcp.mdevMax = KCP_RTO_MIN
+			}
+		}
+	}
+
+	kcp.rxSRTT = max(1, srtt)
+	rto := kcp.rxSRTT*1 + 4*kcp.mdev
+	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MIN)
 }
