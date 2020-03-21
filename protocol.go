@@ -41,7 +41,7 @@ func packACK(sn, ts uint32) uint64 {
 	return (uint64(sn) << PackBits) | uint64(ts&mask)
 }
 
-func removeFront(p []segment, count int) []segment {
+func removeFront(p []*segment, count int) []*segment {
 	if count > len(p) {
 		p = p[:0]
 	} else {

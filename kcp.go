@@ -15,6 +15,7 @@ type segment struct {
 	fastACK  uint32
 	xmint    uint32
 	data     []byte
+	acked    bool
 }
 
 type KCP struct {
@@ -28,10 +29,10 @@ type KCP struct {
 	noDelay, updated                  uint32
 	probe, tsProbe, probeWait         uint32
 	deadLink, incr                    uint32
-	sendQueue, recvQueue              []segment
-	sendBuf, recvBuf                  []segment
+	sendQueue, recvQueue              []*segment
+	sendBuf, recvBuf                  []*segment
 	ackList                           []uint64
-	ackBlock                          uint32
+	ackCount, ackBlock                uint32
 	data                              []byte // use for stream mode
 	fastResendACK, fastACKLimit       uint32
 	nocwnd, streamMode                bool
@@ -65,10 +66,6 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 
 func (kcp *KCP) SetOutput(outputCallback OutputCallback) {
 	kcp.outputCallback = outputCallback
-}
-
-func (kcp *KCP) removeFrontFromRecvQueue(count int) {
-
 }
 
 func (kcp *KCP) PeekSize() (size int) {
@@ -132,7 +129,7 @@ func (kcp *KCP) Recv(buf []byte) int {
 	}
 
 	if count > 0 {
-		removeFront(kcp.recvQueue, count)
+		kcp.recvQueue = removeFront(kcp.recvQueue, count)
 	}
 
 	count = 0
@@ -148,7 +145,7 @@ func (kcp *KCP) Recv(buf []byte) int {
 	}
 
 	if count > 0 {
-		removeFront(kcp.recvBuf, count)
+		kcp.recvBuf = removeFront(kcp.recvBuf, count)
 	}
 
 	// tell remote my recv window size, need to send KCP_CMD_WINS
@@ -209,7 +206,7 @@ func (kcp *KCP) Send(buf []byte) int {
 			size = int(kcp.mss)
 		}
 
-		seg := segment{}
+		seg := &segment{}
 		seg.data = bufferPool.Get().([]byte)[:size]
 		copy(seg.data, buf[:size])
 		if kcp.streamMode {
@@ -228,15 +225,15 @@ func (kcp *KCP) Send(buf []byte) int {
 func (kcp *KCP) updateACK(rtt uint32) {
 	if kcp.rxSRTT == 0 {
 		kcp.rxSRTT = rtt
-		kcp.rxRTTVal = rtt / 2
+		kcp.rxRTTVal = rtt / 2 // 1/2
 	} else {
 		delta := rtt - kcp.rxSRTT
 		if delta < 0 {
 			delta = -delta
 		}
 
-		kcp.rxRTTVal = (3*kcp.rxRTTVal + delta) / 4
-		kcp.rxSRTT = (7*kcp.rxSRTT + rtt) / 8
+		kcp.rxRTTVal = (3*kcp.rxRTTVal + delta) / 4 // 1/4
+		kcp.rxSRTT = (7*kcp.rxSRTT + rtt) / 8       // 1/8
 		if kcp.rxSRTT < 1 {
 			kcp.rxSRTT = 1
 		}
@@ -250,8 +247,8 @@ func (kcp *KCP) updateACK2(rtt uint32) {
 	srtt := kcp.rxSRTT
 	m := rtt
 	if kcp.rxSRTT == 0 {
-		srtt = uint32(m << 3)
-		kcp.mdev = uint32(m << 1)
+		srtt = m << 3
+		kcp.mdev = m << 1
 		kcp.rxRTTVal = max(kcp.mdev, KCP_RTO_MIN)
 		kcp.mdevMax = kcp.rxRTTVal
 		kcp.rttSN = kcp.sendNext
@@ -289,4 +286,81 @@ func (kcp *KCP) updateACK2(rtt uint32) {
 	kcp.rxSRTT = max(1, srtt)
 	rto := kcp.rxSRTT*1 + 4*kcp.mdev
 	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MIN)
+}
+
+func (kcp *KCP) shrinkSendBuf() {
+	if len(kcp.sendBuf) > 0 {
+		seg := kcp.sendBuf[0]
+		kcp.sendUNA = seg.sn
+	} else {
+		kcp.sendUNA = kcp.sendNext
+	}
+}
+
+func (kcp *KCP) parseACK(sn uint32) {
+	if timediff(sn, kcp.sendUNA) < 0 || timediff(sn, kcp.sendNext) >= 0 {
+		return
+	}
+
+	for idx := range kcp.sendBuf {
+		seg := kcp.sendBuf[idx]
+		if sn == seg.sn {
+			seg.acked = true
+			bufferPool.Put(seg.data)
+			seg.data = nil
+			break
+		}
+
+		if timediff(sn, seg.sn) < 0 {
+			break
+		}
+	}
+}
+
+func (kcp *KCP) parseUNA(una uint32) {
+	count := 0
+	for idx := range kcp.sendBuf {
+		seg := kcp.sendBuf[idx]
+		if timediff(una, seg.sn) > 0 {
+			bufferPool.Put(seg.data)
+			seg.data = nil
+			count++
+		} else {
+			break
+		}
+	}
+
+	if count > 0 {
+		kcp.sendBuf = removeFront(kcp.sendBuf, count)
+	}
+}
+
+func (kcp *KCP) parseFastACK(sn uint32, ts uint32) {
+	if timediff(sn, kcp.sendUNA) < 0 || timediff(sn, kcp.sendNext) >= 0 {
+		return
+	}
+
+	for idx := range kcp.sendBuf {
+		seg := kcp.sendBuf[idx]
+		if timediff(sn, seg.sn) < 0 {
+			break
+		} else if sn != seg.sn {
+			if timediff(ts, seg.ts) >= 0 {
+				seg.fastACK++
+			}
+		}
+	}
+}
+
+func (kcp *KCP) ackPush(sn, ts uint32) {
+	kcp.ackList = append(kcp.ackList, packACK(sn, ts))
+}
+
+func (kcp *KCP) getACK(idx int) (sn, ts uint32) {
+	sn, ts = unpackACK(kcp.ackList[idx])
+	return
+}
+
+func (kcp *KCP) parseData(seg *segment) {
+
 }
