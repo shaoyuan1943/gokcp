@@ -33,7 +33,7 @@ type KCP struct {
 	sendBuf, recvBuf                  []*segment
 	ackList                           []uint64
 	ackCount, ackBlock                uint32
-	data                              []byte // use for stream mode
+	data                              []byte // only use for stream mode
 	fastResendACK, fastACKLimit       uint32
 	nocwnd, streamMode                bool
 	outputCallback                    OutputCallback
@@ -361,6 +361,50 @@ func (kcp *KCP) getACK(idx int) (sn, ts uint32) {
 	return
 }
 
-func (kcp *KCP) parseData(seg *segment) {
+func (kcp *KCP) parseData(newSeg *segment) {
+	repeat := false
+	sn := newSeg.sn
+	if timediff(sn, kcp.recvNext+kcp.recvWnd) >= 0 || timediff(sn, kcp.recvNext) < 0 {
+		bufferPool.Put(newSeg.data)
+		newSeg.data = nil
+		return
+	}
 
+	istIdx := 0
+	for idx := len(kcp.recvBuf) - 1; idx >= 0; idx-- {
+		seg := kcp.recvBuf[idx]
+		if seg.sn == sn {
+			repeat = true
+			break
+		}
+
+		if timediff(sn, seg.sn) > 0 {
+			istIdx = idx + 1
+			break
+		}
+	}
+
+	if !repeat {
+		if istIdx == len(kcp.recvBuf) {
+			kcp.recvBuf = append(kcp.recvBuf, newSeg)
+		} else {
+			kcp.recvBuf = append(kcp.recvBuf, &segment{})
+			copy(kcp.recvBuf[istIdx+1:], kcp.recvBuf[istIdx:])
+			kcp.recvBuf[istIdx] = newSeg
+		}
+	} else {
+		bufferPool.Put(newSeg.data)
+		newSeg.data = nil
+	}
+
+	// move available data from rcv_buf -> rcv_queue
+	count := 0
+	for idx := range kcp.recvBuf {
+		seg := kcp.recvBuf[idx]
+		if seg.sn == kcp.recvNext && len(kcp.recvBuf) < int(kcp.recvWnd) {
+
+		} else {
+			break
+		}
+	}
 }
