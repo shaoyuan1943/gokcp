@@ -24,7 +24,7 @@ type KCP struct {
 	recent, lastACK                   uint32
 	ssthresh                          uint32
 	rxRTTVal, rxSRTT, rxRTO, rxMinRTO uint32
-	sendWnd, recvWnd, rmtWnd, cwnd    uint32
+	sendWnd, recvWnd, remoteWnd, cwnd uint32
 	current, interval, tsFlush, xmit  uint32
 	noDelay, updated                  uint32
 	probe, tsProbe, probeWait         uint32
@@ -46,11 +46,18 @@ var (
 	}}
 )
 
+func newSegment(size uint32) *segment {
+	s := &segment{}
+	s.data = make([]byte, size)
+	s.data = s.data[:size]
+	return s
+}
+
 func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp := &KCP{convID: convID, outputCallback: outputCallbakc}
 	kcp.sendWnd = KCP_WND_SND
 	kcp.recvWnd = KCP_WND_RCV
-	kcp.rmtWnd = KCP_WND_RCV
+	kcp.remoteWnd = KCP_WND_RCV
 	kcp.mtu = KCP_MTU_DEF
 	kcp.mss = kcp.mtu - KCP_OVERHEAD
 	kcp.rxRTO = KCP_RTO_DEF
@@ -222,6 +229,7 @@ func (kcp *KCP) Send(buf []byte) int {
 	return 0
 }
 
+// calculate RTO
 func (kcp *KCP) updateACK(rtt uint32) {
 	if kcp.rxSRTT == 0 {
 		kcp.rxSRTT = rtt
@@ -402,9 +410,174 @@ func (kcp *KCP) parseData(newSeg *segment) {
 	for idx := range kcp.recvBuf {
 		seg := kcp.recvBuf[idx]
 		if seg.sn == kcp.recvNext && len(kcp.recvBuf) < int(kcp.recvWnd) {
-
+			count++
+			kcp.recvNext++
 		} else {
 			break
 		}
 	}
+
+	if count > 0 {
+		kcp.recvQueue = append(kcp.recvQueue, kcp.recvBuf[:count]...)
+		kcp.recvBuf = removeFront(kcp.recvBuf, count)
+	}
+}
+
+func (kcp *KCP) Input(data []byte) int {
+	prevUNA := kcp.sendUNA
+	var maxACK, latestTs uint32 = 0, 0
+	flag := 0
+
+	if data == nil || len(data) < int(KCP_OVERHEAD) {
+		return -1
+	}
+
+	for {
+		var ts, sn, length, una, convID uint32
+		var wnd uint16
+		var cmd, frg uint8
+		if len(data) < int(KCP_OVERHEAD) {
+			break
+		}
+
+		data = decode32u(data, &convID)
+		if convID != kcp.convID {
+			return -1
+		}
+		data = decode8u(data, &cmd)
+		data = decode8u(data, &frg)
+		data = decode16u(data, &wnd)
+		data = decode32u(data, &ts)
+		data = decode32u(data, &sn)
+		data = decode32u(data, &una)
+		data = decode32u(data, &length)
+
+		if len(data) > int(length) || length < 0 {
+			return -2
+		}
+
+		if uint32(cmd) != KCP_CMD_PUSH && uint32(cmd) != KCP_CMD_ACK &&
+			uint32(cmd) != KCP_CMD_WASK && uint32(cmd) != KCP_CMD_WINS {
+			return -3
+		}
+
+		kcp.remoteWnd = uint32(wnd)
+		kcp.parseUNA(una)
+		kcp.shrinkSendBuf()
+		switch uint32(cmd) {
+		case KCP_CMD_ACK:
+			if timediff(kcp.current, ts) >= 0 {
+				kcp.updateACK(uint32(timediff(kcp.current, ts)))
+			}
+			kcp.parseACK(sn)
+			kcp.shrinkSendBuf()
+
+			if flag == 0 {
+				flag = 1
+				maxACK = sn
+				latestTs = ts
+			} else {
+				if timediff(sn, maxACK) > 0 {
+					maxACK = sn
+					latestTs = ts
+				}
+			}
+		case KCP_CMD_PUSH:
+			if timediff(sn, kcp.recvNext+kcp.recvWnd) < 0 {
+				kcp.ackPush(sn, ts)
+				if timediff(sn, kcp.recvNext) >= 0 {
+					seg := newSegment(length)
+					seg.convID = convID
+					seg.cmd = uint32(cmd)
+					seg.frg = uint32(frg)
+					seg.wnd = uint32(wnd)
+					seg.ts = ts
+					seg.sn = sn
+					seg.una = una
+					if length > 0 {
+						copy(seg.data, data[:length])
+					}
+					kcp.parseData(seg)
+				}
+			}
+		case KCP_CMD_WASK:
+			// ready to send back IKCP_CMD_WINS in ikcp_flush
+			// tell remote my window size
+			kcp.probe |= KCP_ASK_TELL
+		case KCP_CMD_WINS:
+			// do nothing
+		default:
+			return -3
+		}
+
+		data = data[length:]
+	}
+
+	if flag != 0 {
+		kcp.parseFastACK(maxACK, latestTs)
+	}
+
+	// update local cwnd
+	if timediff(kcp.sendUNA, prevUNA) > 0 {
+		if kcp.cwnd < kcp.remoteWnd {
+			mss := kcp.mss
+			if kcp.cwnd < kcp.ssthresh {
+				kcp.cwnd++
+				kcp.incr += mss
+			} else {
+				if kcp.incr < mss {
+					kcp.incr = mss
+				}
+
+				kcp.incr += (mss*mss)/kcp.incr + (mss / 16)
+				if (kcp.cwnd+1)*mss <= kcp.incr {
+					var tmpVar uint32 = 1
+					if mss > 0 {
+						tmpVar = mss
+					}
+					kcp.cwnd = (kcp.incr + mss - 1) / tmpVar
+				}
+			}
+
+			if kcp.cwnd > kcp.remoteWnd {
+				kcp.cwnd = kcp.remoteWnd
+				kcp.incr = kcp.remoteWnd * mss
+			}
+		}
+	}
+
+	return 0
+}
+
+func (kcp *KCP) flush() {
+	current := kcp.current
+
+	if kcp.updated == 0 {
+		return
+	}
+
+	seg := &segment{}
+	seg.convID = kcp.convID
+	seg.cmd = KCP_CMD_ACK
+	seg.frg = 0
+	// wnd unused
+	if uint32(len(kcp.recvQueue)) < kcp.recvWnd {
+		seg.wnd = kcp.recvWnd - uint32(len(kcp.recvQueue))
+	}
+	seg.una = kcp.recvNext
+	seg.sn = 0
+	seg.ts = 0
+
+	// flush acknowledges
+	for idx := range kcp.ackList {
+
+	}
+}
+
+func (kcp *KCP) output(data []byte) {
+	if len(data) <= 0 {
+		return
+	}
+
+	kcp.outputCallback(data)
 }
