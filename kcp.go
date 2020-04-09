@@ -13,7 +13,7 @@ type segment struct {
 	resendTs uint32
 	rto      uint32
 	fastACK  uint32
-	xmint    uint32
+	xmit     uint32
 	data     []byte
 	acked    bool
 }
@@ -26,14 +26,16 @@ type KCP struct {
 	rxRTTVal, rxSRTT, rxRTO, rxMinRTO uint32
 	sendWnd, recvWnd, remoteWnd, cwnd uint32
 	current, interval, tsFlush, xmit  uint32
-	noDelay, updated                  uint32
+	noDelay                           bool
+	updated                           uint32
 	probe, tsProbe, probeWait         uint32
 	deadLink, incr                    uint32
 	sendQueue, recvQueue              []*segment
-	sendBuf, recvBuf                  []*segment
+	sendBuffer, recvBuffer            []*segment
 	ackList                           []uint64
 	ackCount, ackBlock                uint32
-	data                              []byte // only use for stream mode
+	dataBuffer                        []byte
+	buffer                            *Buffer
 	fastResendACK, fastACKLimit       uint32
 	nocwnd, streamMode                bool
 	outputCallback                    OutputCallback
@@ -67,7 +69,9 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.ssthresh = KCP_THRESH_INIT
 	kcp.fastACKLimit = KCP_FASTACK_LIMIT
 	kcp.deadLink = KCP_DEADLINK
-	kcp.data = make([]byte, kcp.mtu)
+	kcp.dataBuffer = make([]byte, kcp.mtu)
+	kcp.dataBuffer = kcp.dataBuffer[:0]
+	kcp.buffer = NewBuffer(int(kcp.mtu))
 	return kcp
 }
 
@@ -140,8 +144,8 @@ func (kcp *KCP) Recv(buf []byte) int {
 	}
 
 	count = 0
-	for idx := range kcp.recvBuf {
-		seg := kcp.recvBuf[idx]
+	for idx := range kcp.recvBuffer {
+		seg := kcp.recvBuffer[idx]
 		if seg.sn == kcp.recvNext && len(kcp.recvQueue) < int(kcp.recvWnd) {
 			kcp.recvQueue = append(kcp.recvQueue, seg)
 			kcp.recvNext++
@@ -152,7 +156,7 @@ func (kcp *KCP) Recv(buf []byte) int {
 	}
 
 	if count > 0 {
-		kcp.recvBuf = removeFront(kcp.recvBuf, count)
+		kcp.recvBuffer = removeFront(kcp.recvBuffer, count)
 	}
 
 	// tell remote my recv window size, need to send KCP_CMD_WINS
@@ -297,8 +301,8 @@ func (kcp *KCP) updateACK2(rtt uint32) {
 }
 
 func (kcp *KCP) shrinkSendBuf() {
-	if len(kcp.sendBuf) > 0 {
-		seg := kcp.sendBuf[0]
+	if len(kcp.sendBuffer) > 0 {
+		seg := kcp.sendBuffer[0]
 		kcp.sendUNA = seg.sn
 	} else {
 		kcp.sendUNA = kcp.sendNext
@@ -310,8 +314,8 @@ func (kcp *KCP) parseACK(sn uint32) {
 		return
 	}
 
-	for idx := range kcp.sendBuf {
-		seg := kcp.sendBuf[idx]
+	for idx := range kcp.sendBuffer {
+		seg := kcp.sendBuffer[idx]
 		if sn == seg.sn {
 			seg.acked = true
 			bufferPool.Put(seg.data)
@@ -327,8 +331,8 @@ func (kcp *KCP) parseACK(sn uint32) {
 
 func (kcp *KCP) parseUNA(una uint32) {
 	count := 0
-	for idx := range kcp.sendBuf {
-		seg := kcp.sendBuf[idx]
+	for idx := range kcp.sendBuffer {
+		seg := kcp.sendBuffer[idx]
 		if timediff(una, seg.sn) > 0 {
 			bufferPool.Put(seg.data)
 			seg.data = nil
@@ -339,7 +343,7 @@ func (kcp *KCP) parseUNA(una uint32) {
 	}
 
 	if count > 0 {
-		kcp.sendBuf = removeFront(kcp.sendBuf, count)
+		kcp.sendBuffer = removeFront(kcp.sendBuffer, count)
 	}
 }
 
@@ -348,8 +352,8 @@ func (kcp *KCP) parseFastACK(sn uint32, ts uint32) {
 		return
 	}
 
-	for idx := range kcp.sendBuf {
-		seg := kcp.sendBuf[idx]
+	for idx := range kcp.sendBuffer {
+		seg := kcp.sendBuffer[idx]
 		if timediff(sn, seg.sn) < 0 {
 			break
 		} else if sn != seg.sn {
@@ -379,8 +383,8 @@ func (kcp *KCP) parseData(newSeg *segment) {
 	}
 
 	istIdx := 0
-	for idx := len(kcp.recvBuf) - 1; idx >= 0; idx-- {
-		seg := kcp.recvBuf[idx]
+	for idx := len(kcp.recvBuffer) - 1; idx >= 0; idx-- {
+		seg := kcp.recvBuffer[idx]
 		if seg.sn == sn {
 			repeat = true
 			break
@@ -393,12 +397,12 @@ func (kcp *KCP) parseData(newSeg *segment) {
 	}
 
 	if !repeat {
-		if istIdx == len(kcp.recvBuf) {
-			kcp.recvBuf = append(kcp.recvBuf, newSeg)
+		if istIdx == len(kcp.recvBuffer) {
+			kcp.recvBuffer = append(kcp.recvBuffer, newSeg)
 		} else {
-			kcp.recvBuf = append(kcp.recvBuf, &segment{})
-			copy(kcp.recvBuf[istIdx+1:], kcp.recvBuf[istIdx:])
-			kcp.recvBuf[istIdx] = newSeg
+			kcp.recvBuffer = append(kcp.recvBuffer, &segment{})
+			copy(kcp.recvBuffer[istIdx+1:], kcp.recvBuffer[istIdx:])
+			kcp.recvBuffer[istIdx] = newSeg
 		}
 	} else {
 		bufferPool.Put(newSeg.data)
@@ -407,9 +411,9 @@ func (kcp *KCP) parseData(newSeg *segment) {
 
 	// move available data from rcv_buf -> rcv_queue
 	count := 0
-	for idx := range kcp.recvBuf {
-		seg := kcp.recvBuf[idx]
-		if seg.sn == kcp.recvNext && len(kcp.recvBuf) < int(kcp.recvWnd) {
+	for idx := range kcp.recvBuffer {
+		seg := kcp.recvBuffer[idx]
+		if seg.sn == kcp.recvNext && len(kcp.recvBuffer) < int(kcp.recvWnd) {
 			count++
 			kcp.recvNext++
 		} else {
@@ -418,8 +422,8 @@ func (kcp *KCP) parseData(newSeg *segment) {
 	}
 
 	if count > 0 {
-		kcp.recvQueue = append(kcp.recvQueue, kcp.recvBuf[:count]...)
-		kcp.recvBuf = removeFront(kcp.recvBuf, count)
+		kcp.recvQueue = append(kcp.recvQueue, kcp.recvBuffer[:count]...)
+		kcp.recvBuffer = removeFront(kcp.recvBuffer, count)
 	}
 }
 
@@ -570,7 +574,199 @@ func (kcp *KCP) flush() {
 
 	// flush acknowledges
 	for idx := range kcp.ackList {
+		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+			kcp.output(kcp.buffer.Data())
+			kcp.buffer.Reset()
+		}
 
+		seg.sn, seg.ts = unpackACK(kcp.ackList[idx])
+		kcp.buffer.WriteOverHeader(seg)
+	}
+	kcp.ackList = kcp.ackList[:0]
+
+	// probe window size (if remote window size equals zero)
+	if kcp.remoteWnd == 0 {
+		if kcp.probeWait == 0 {
+			kcp.probeWait = KCP_PROBE_INIT
+			kcp.tsProbe = kcp.current + kcp.probeWait
+		} else {
+			if timediff(kcp.current, kcp.probeWait) >= 0 {
+				if kcp.probeWait < KCP_PROBE_INIT {
+					kcp.probeWait = KCP_PROBE_INIT
+				}
+				kcp.probeWait += kcp.probeWait / 2
+
+				if kcp.probeWait > KCP_PROBE_LIMIT {
+					kcp.probeWait = KCP_PROBE_LIMIT
+				}
+				kcp.tsProbe = kcp.current + kcp.probeWait
+				kcp.probe |= KCP_ASK_SEND
+			}
+		}
+	} else {
+		kcp.tsProbe = 0
+		kcp.probeWait = 0
+	}
+
+	// flush window probing commands
+	if (kcp.probe & KCP_ASK_SEND) != 0 {
+		seg.cmd = KCP_CMD_WASK
+		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+			kcp.output(kcp.buffer.Data())
+			kcp.buffer.Reset()
+		}
+
+		kcp.buffer.WriteOverHeader(seg)
+	}
+
+	if (kcp.probe & KCP_ASK_TELL) != 0 {
+		seg.cmd = KCP_CMD_WINS
+		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+			kcp.output(kcp.buffer.Data())
+			kcp.buffer.Reset()
+		}
+
+		kcp.buffer.WriteOverHeader(seg)
+	}
+	kcp.probe = 0
+
+	// calculate window size
+	cwnd := min(kcp.sendWnd, kcp.remoteWnd)
+	if !kcp.nocwnd {
+		cwnd = min(kcp.cwnd, cwnd)
+	}
+
+	// move data from sendQueue to sendBuffer
+	count := 0
+	for idx := 0; idx < len(kcp.sendQueue); idx++ {
+		if timediff(kcp.sendNext, kcp.sendUNA+cwnd) >= 0 {
+			break
+		}
+
+		newseg := kcp.sendQueue[idx]
+		newseg.convID = kcp.convID
+		newseg.cmd = KCP_CMD_PUSH
+		newseg.wnd = seg.wnd
+		newseg.ts = current
+		newseg.sn = kcp.sendNext
+		newseg.una = kcp.recvNext
+		newseg.resendTs = current
+		newseg.rto = kcp.rxRTO
+		newseg.fastACK = 0
+		newseg.xmit = 0
+		kcp.sendBuffer = append(kcp.sendBuffer, newseg)
+		kcp.sendNext++
+		count++
+	}
+	if count > 0 {
+		kcp.sendQueue = removeFront(kcp.sendQueue, count)
+	}
+
+	// calculate resent
+	var resent uint32
+	if kcp.fastResendACK > 0 {
+		resent = kcp.fastResendACK
+	} else {
+		resent = 0xffffffff
+	}
+
+	var minRTO uint32
+	if !kcp.noDelay {
+		minRTO = kcp.rxRTO >> 3
+	} else {
+		minRTO = 0
+	}
+
+	// flush data segments
+	lost := false
+	change := 0
+	for idx := 0; idx < len(kcp.sendBuffer); idx++ {
+		sendSegment := kcp.sendBuffer[idx]
+		needSend := false
+		// first send
+		if sendSegment.xmit == 0 {
+			needSend = true
+			sendSegment.xmit++
+			sendSegment.rto = kcp.rxRTO
+			sendSegment.resendTs = current + sendSegment.rto + minRTO
+		} else if timediff(current, sendSegment.resendTs) >= 0 {
+			needSend = true
+			sendSegment.xmit++
+			kcp.xmit++
+			if !kcp.noDelay {
+				sendSegment.rto += kcp.rxRTO
+			} else {
+				sendSegment.rto += kcp.rxRTO / 2
+			}
+			sendSegment.resendTs = current + sendSegment.rto
+			lost = true
+		} else if sendSegment.fastACK >= resent {
+			if sendSegment.xmit <= kcp.fastACKLimit || kcp.fastACKLimit <= 0 {
+				needSend = true
+				sendSegment.xmit++
+				sendSegment.fastACK = 0
+				sendSegment.resendTs = current + sendSegment.rto
+				change++
+			}
+		}
+
+		if needSend {
+			sendSegment.ts = current
+			sendSegment.wnd = seg.wnd
+			sendSegment.una = kcp.recvNext
+
+			if kcp.buffer.Len()+int(KCP_OVERHEAD)+len(sendSegment.data) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.Data())
+				kcp.buffer.Reset()
+			}
+
+			kcp.buffer.WriteOverHeader(seg)
+			if int(KCP_OVERHEAD)+len(sendSegment.data) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.Data())
+				kcp.buffer.Reset()
+			}
+
+			if len(sendSegment.data) > 0 {
+				kcp.buffer.Write(sendSegment.data)
+			}
+
+			if sendSegment.xmit >= kcp.deadLink {
+				kcp.state = -1
+			}
+		}
+	}
+
+	// flash remain segments
+	if kcp.buffer.Len() > 0 {
+		kcp.output(kcp.buffer.Data())
+		kcp.buffer.Reset()
+	}
+
+	// update ssthresh
+	// rate halving, https://tools.ietf.org/html/rfc6937
+	if change > 0 {
+		inflight := kcp.sendNext - kcp.sendUNA
+		kcp.ssthresh = inflight / 2
+		if kcp.ssthresh < KCP_THRESH_MIN {
+			kcp.ssthresh = KCP_THRESH_MIN
+		}
+		kcp.cwnd = kcp.ssthresh + resent
+		kcp.incr = kcp.cwnd * kcp.mss
+	}
+
+	// if some package lost
+	if lost {
+		kcp.ssthresh = cwnd / 2
+		if kcp.ssthresh < KCP_THRESH_MIN {
+			kcp.ssthresh = KCP_THRESH_MIN
+		}
+		kcp.cwnd = 1
+		kcp.incr = kcp.mss
+	}
+
+	if kcp.cwnd < 1 {
+		kcp.cwnd = 1
+		kcp.incr = kcp.mss
 	}
 }
 
