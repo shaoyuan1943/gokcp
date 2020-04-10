@@ -401,6 +401,7 @@ func (kcp *KCP) parseData(newseg *segment) {
 	for idx := len(kcp.recvBuffer) - 1; idx >= 0; idx-- {
 		seg := kcp.recvBuffer[idx]
 		if seg.sn == sn {
+			// repeat message package
 			repeat = true
 			break
 		}
