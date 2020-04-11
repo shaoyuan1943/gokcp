@@ -5,19 +5,19 @@ import (
 )
 
 type segment struct {
-	convID   uint32
-	cmd      uint32 // package type
-	frg      uint32 // user data slice number, 0 is last
-	wnd      uint32 // recv window size
-	ts       uint32 // send message timestamp
-	sn       uint32 // sequence number
-	una      uint32 // next message sequence number
-	resendTs uint32
-	rto      uint32
-	fastACK  uint32
-	xmit     uint32
-	data     []byte
-	acked    bool
+	convID     uint32
+	cmd        uint32 // package type
+	frg        uint32 // user data slice number, 0 is last
+	wnd        uint32 // recv window size
+	ts         uint32 // send message timestamp
+	sn         uint32 // sequence number
+	una        uint32 // next message sequence number
+	resendTs   uint32
+	rto        uint32
+	fastACK    uint32
+	xmit       uint32
+	dataBuffer []byte
+	acked      bool
 }
 
 func (seg *segment) reset() {
@@ -32,7 +32,7 @@ func (seg *segment) reset() {
 	seg.rto = 0
 	seg.fastACK = 0
 	seg.xmit = 0
-	seg.data = seg.data[:0]
+	seg.dataBuffer = seg.dataBuffer[:0]
 	seg.acked = false
 }
 
@@ -94,7 +94,7 @@ func (kcp *KCP) PeekSize() (size int) {
 
 	seg := kcp.recvQueue[0]
 	if seg.frg == 0 {
-		return len(seg.data)
+		return len(seg.dataBuffer)
 	}
 
 	if len(kcp.recvQueue) < int(seg.frg+1) {
@@ -103,7 +103,7 @@ func (kcp *KCP) PeekSize() (size int) {
 
 	for idx := range kcp.recvQueue {
 		seg := kcp.recvQueue[idx]
-		size += len(seg.data)
+		size += len(seg.dataBuffer)
 		if seg.frg == 0 {
 			break
 		}
@@ -139,9 +139,9 @@ func (kcp *KCP) Recv(buffer []byte) int {
 	for idx := range kcp.recvQueue {
 		seg := kcp.recvQueue[idx]
 		frg := seg.frg
-		copy(buffer, seg.data)
-		buffer = buffer[:len(seg.data)]
-		n += len(seg.data)
+		copy(buffer, seg.dataBuffer)
+		buffer = buffer[:len(seg.dataBuffer)]
+		n += len(seg.dataBuffer)
 		count++
 
 		putSegment(seg)
@@ -189,8 +189,8 @@ func (kcp *KCP) Send(buffer []byte) int {
 	if kcp.streamMode {
 		if len(kcp.sendQueue) > 0 {
 			seg := kcp.sendQueue[len(kcp.sendQueue)-1]
-			if len(seg.data) < int(kcp.mss) {
-				capacity := int(kcp.mss) - len(seg.data)
+			if len(seg.dataBuffer) < int(kcp.mss) {
+				capacity := int(kcp.mss) - len(seg.dataBuffer)
 				extend := 0
 				if len(buffer) < capacity {
 					extend = len(buffer)
@@ -199,9 +199,9 @@ func (kcp *KCP) Send(buffer []byte) int {
 				}
 
 				// copy data to old segment
-				orgLen := len(seg.data)
-				seg.data = seg.data[:orgLen+extend]
-				copy(seg.data[orgLen:], buffer)
+				orgLen := len(seg.dataBuffer)
+				seg.dataBuffer = seg.dataBuffer[:orgLen+extend]
+				copy(seg.dataBuffer[orgLen:], buffer)
 				buffer = buffer[extend:]
 			}
 		}
@@ -234,8 +234,8 @@ func (kcp *KCP) Send(buffer []byte) int {
 		}
 
 		seg := getSegment()
-		seg.data = seg.data[:size]
-		copy(seg.data, buffer[:size])
+		seg.dataBuffer = seg.dataBuffer[:size]
+		copy(seg.dataBuffer, buffer[:size])
 		if kcp.streamMode {
 			seg.frg = 0
 		} else {
@@ -390,11 +390,12 @@ func (kcp *KCP) getACK(idx int) (sn, ts uint32) {
 	return
 }
 
-func (kcp *KCP) parseData(newseg *segment) {
+// Return true if this message been received
+func (kcp *KCP) parseData(newseg *segment) bool {
 	repeat := false
 	sn := newseg.sn
 	if timediff(sn, kcp.recvNext+kcp.recvWnd) >= 0 || timediff(sn, kcp.recvNext) < 0 {
-		return
+		return true
 	}
 
 	istIdx := 0
@@ -422,7 +423,7 @@ func (kcp *KCP) parseData(newseg *segment) {
 		}
 	}
 
-	// move available data from rcv_buf -> rcv_queue
+	// move available data from recvBuffer -> recvQueue
 	count := 0
 	for idx := range kcp.recvBuffer {
 		seg := kcp.recvBuffer[idx]
@@ -438,6 +439,8 @@ func (kcp *KCP) parseData(newseg *segment) {
 		kcp.recvQueue = append(kcp.recvQueue, kcp.recvBuffer[:count]...)
 		kcp.recvBuffer = removeFront(kcp.recvBuffer, count)
 	}
+
+	return repeat
 }
 
 func (kcp *KCP) Input(data []byte) int {
@@ -445,7 +448,7 @@ func (kcp *KCP) Input(data []byte) int {
 	var maxACK, latestTs uint32 = 0, 0
 	flag := 0
 
-	if data == nil || len(data) < int(KCP_OVERHEAD) {
+	if len(data) < int(KCP_OVERHEAD) {
 		return -1
 	}
 
@@ -470,7 +473,7 @@ func (kcp *KCP) Input(data []byte) int {
 		data = decode32u(data, &una)
 		data = decode32u(data, &length)
 
-		if len(data) > int(length) || length < 0 {
+		if len(data) < int(length) || length < 0 {
 			return -2
 		}
 
@@ -505,7 +508,7 @@ func (kcp *KCP) Input(data []byte) int {
 				kcp.ackPush(sn, ts)
 				if timediff(sn, kcp.recvNext) >= 0 {
 					seg := getSegment()
-					seg.data = seg.data[:length]
+					seg.dataBuffer = seg.dataBuffer[:length]
 					seg.convID = convID
 					seg.cmd = uint32(cmd)
 					seg.frg = uint32(frg)
@@ -513,10 +516,14 @@ func (kcp *KCP) Input(data []byte) int {
 					seg.ts = ts
 					seg.sn = sn
 					seg.una = una
-					if length > 0 {
-						copy(seg.data, data[:length])
+					repeat := kcp.parseData(seg)
+					if !repeat {
+						if length > 0 {
+							copy(seg.dataBuffer, data[:length])
+						}
+					} else {
+						putSegment(seg)
 					}
-					kcp.parseData(seg)
 				}
 			}
 		case KCP_CMD_WASK:
@@ -734,14 +741,14 @@ func (kcp *KCP) flush() {
 			sendSegment.wnd = seg.wnd
 			sendSegment.una = kcp.recvNext
 
-			if kcp.buffer.Len()+int(KCP_OVERHEAD)+len(sendSegment.data) > int(kcp.mtu) {
+			if kcp.buffer.Len()+int(KCP_OVERHEAD)+len(sendSegment.dataBuffer) > int(kcp.mtu) {
 				kcp.output(kcp.buffer.Data())
 				kcp.buffer.Reset()
 			}
 
 			kcp.buffer.WriteOverHeader(seg)
-			if len(sendSegment.data) > 0 {
-				kcp.buffer.Write(sendSegment.data)
+			if len(sendSegment.dataBuffer) > 0 {
+				kcp.buffer.Write(sendSegment.dataBuffer)
 			}
 
 			if sendSegment.xmit >= kcp.deadLink {
@@ -905,7 +912,7 @@ func (kcp *KCP) SetWndSize(sendWnd, recvWnd int) {
 	kcp.recvWnd = max(uint32(recvWnd), KCP_WND_RCV)
 }
 
-func (kcp *KCP) HowManyWait2Send() int {
+func (kcp *KCP) WaitSend() int {
 	return len(kcp.sendQueue) + len(kcp.sendBuffer)
 }
 
