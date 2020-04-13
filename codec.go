@@ -55,13 +55,13 @@ func timediff(later, earlier uint32) int32 {
 }
 
 func encodeSegment(data []byte, seg *segment) []byte {
-	rawseg := encode32u(data, seg.convID)             // 4
-	rawseg = encode8u(rawseg, uint8(seg.cmd))         // 1
-	rawseg = encode8u(rawseg, uint8(seg.frg))         // 1
-	rawseg = encode16u(rawseg, uint16(seg.wnd))       // 2
-	rawseg = encode32u(rawseg, seg.ts)                // 4
-	rawseg = encode32u(rawseg, seg.sn)                // 4
-	rawseg = encode32u(rawseg, seg.una)               // 4
-	rawseg = encode32u(rawseg, uint32(len(seg.data))) // 4
+	rawseg := encode32u(data, seg.convID)                   // 4
+	rawseg = encode8u(rawseg, uint8(seg.cmd))               // 1
+	rawseg = encode8u(rawseg, uint8(seg.frg))               // 1
+	rawseg = encode16u(rawseg, uint16(seg.wnd))             // 2
+	rawseg = encode32u(rawseg, seg.ts)                      // 4
+	rawseg = encode32u(rawseg, seg.sn)                      // 4
+	rawseg = encode32u(rawseg, seg.una)                     // 4
+	rawseg = encode32u(rawseg, uint32(len(seg.dataBuffer))) // 4
 	return rawseg
 }

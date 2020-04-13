@@ -35,7 +35,7 @@ func (b *Buffer) WriteOverHeader(seg *segment) {
 	binary.LittleEndian.PutUint32(b.segBuffer[8:], seg.ts)
 	binary.LittleEndian.PutUint32(b.segBuffer[12:], seg.sn)
 	binary.LittleEndian.PutUint32(b.segBuffer[16:], seg.una)
-	binary.LittleEndian.PutUint32(b.segBuffer[20:], uint32(len(seg.data)))
+	binary.LittleEndian.PutUint32(b.segBuffer[20:], uint32(len(seg.dataBuffer)))
 	b.segBuffer = b.segBuffer[0:]
 	b.Write(b.segBuffer)
 }

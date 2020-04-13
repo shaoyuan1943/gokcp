@@ -5,8 +5,8 @@ import "sync"
 var (
 	segmentPool = sync.Pool{New: func() interface{} {
 		s := &segment{}
-		s.data = make([]byte, KCP_MTU_DEF)
-		s.data = s.data[:0]
+		s.dataBuffer = make([]byte, KCP_MTU_DEF)
+		s.dataBuffer = s.dataBuffer[:0]
 		return s
 	}}
 )

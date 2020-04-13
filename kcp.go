@@ -37,25 +37,26 @@ func (seg *segment) reset() {
 }
 
 type KCP struct {
-	convID, mtu, mss, state           uint32
-	sendUNA, sendNext, recvNext       uint32
-	recent, lastACK                   uint32
-	ssthresh                          uint32
-	rxRTTVal, rxSRTT, rxRTO, rxMinRTO uint32
-	sendWnd, recvWnd, remoteWnd, cwnd uint32
-	interval, tsFlush, xmit           uint32
-	noDelay                           bool
-	updated                           uint32
-	probe, tsProbe, probeWait         uint32
-	deadLink, incr                    uint32
-	sendQueue, recvQueue              []*segment
-	sendBuffer, recvBuffer            []*segment
-	ackList                           []uint64
-	buffer                            *Buffer
-	fastResendACK, fastACKLimit       uint32
-	nocwnd, streamMode                bool
-	outputCallback                    OutputCallback
-	mdev, mdevMax, rttSN              uint32
+	convID, mtu, mss, state             uint32
+	sendUNA, sendNext, recvNext         uint32
+	recent, lastACK                     uint32
+	ssthresh                            uint32
+	rxRTTValue, rxSRTT, rxRTO, rxMinRTO uint32
+	sendWnd, recvWnd, remoteWnd, cwnd   uint32
+	interval, tsFlush, xmit             uint32
+	noDelay                             bool
+	updated                             uint32
+	probe, tsProbe, probeWait           uint32
+	deadLink, incr                      uint32
+	sendQueue, recvQueue                []*segment
+	sendBuffer, recvBuffer              []*segment
+	ackList                             []uint64
+	buffer                              *Buffer
+	fastResendACK, fastACKLimit         uint32
+	nocwnd, streamMode                  bool
+	outputCallback                      OutputCallback
+	mdev, mdevMax, rttSN                uint32
+	Stat                                *Stats
 }
 
 var startTime time.Time = time.Now()
@@ -251,38 +252,39 @@ func (kcp *KCP) Send(buffer []byte) int {
 
 // calculate RTO
 // RFC6298：http://tools.ietf.org/html/rfc6298
-func (kcp *KCP) updateACK(rtt uint32) {
+func (kcp *KCP) updateACK(rtt uint32) uint32 {
 	if kcp.rxSRTT == 0 {
 		kcp.rxSRTT = rtt
-		kcp.rxRTTVal = rtt / 2 // 1/2
+		kcp.rxRTTValue = rtt >> 1 // 1/2
 	} else {
 		delta := rtt - kcp.rxSRTT
 		if delta < 0 {
 			delta = -delta
 		}
 
-		kcp.rxRTTVal = (3*kcp.rxRTTVal + delta) / 4 // 1/4
-		kcp.rxSRTT = (7*kcp.rxSRTT + rtt) / 8       // 1/8
+		kcp.rxRTTValue = (3*kcp.rxRTTValue + delta) / 4 // 1/4
+		kcp.rxSRTT = (7*kcp.rxSRTT + rtt) / 8           // 1/8
 		if kcp.rxSRTT < 1 {
 			kcp.rxSRTT = 1
 		}
 	}
 
-	rto := kcp.rxSRTT + max(kcp.interval, 4*kcp.rxRTTVal)
+	rto := kcp.rxSRTT + max(kcp.interval, 4*kcp.rxRTTValue)
 	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MAX)
+	return kcp.rxRTO
 }
 
 // calculate RTO
 // updateACK2 port from tcp_input.c 'tcp_rtt_estimator' function
 // https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_input.c
-func (kcp *KCP) updateACK2(rtt uint32) {
+func (kcp *KCP) updateACK2(rtt uint32) uint32 {
 	srtt := kcp.rxSRTT
 	m := rtt
 	if kcp.rxSRTT == 0 {
 		srtt = m << 3
 		kcp.mdev = m << 1 // make sure rto = 3*rtt
-		kcp.rxRTTVal = max(kcp.mdev, KCP_RTO_MIN)
-		kcp.mdevMax = kcp.rxRTTVal
+		kcp.rxRTTValue = max(kcp.mdev, KCP_RTO_MIN)
+		kcp.mdevMax = kcp.rxRTTValue
 		kcp.rttSN = kcp.sendNext
 	} else {
 		m -= srtt >> 3
@@ -300,13 +302,13 @@ func (kcp *KCP) updateACK2(rtt uint32) {
 		kcp.mdev += m // mdev = 3/4 mdev + 1/4 new
 		if kcp.mdev > kcp.mdevMax {
 			kcp.mdevMax = kcp.mdev
-			if kcp.mdevMax > kcp.rxRTTVal {
-				kcp.rxRTTVal = kcp.mdevMax
+			if kcp.mdevMax > kcp.rxRTTValue {
+				kcp.rxRTTValue = kcp.mdevMax
 			}
 
 			if kcp.sendUNA > kcp.rttSN {
-				if kcp.mdevMax < kcp.rxRTTVal {
-					kcp.rxRTTVal -= (kcp.rxRTTVal - kcp.mdevMax) >> 2
+				if kcp.mdevMax < kcp.rxRTTValue {
+					kcp.rxRTTValue -= (kcp.rxRTTValue - kcp.mdevMax) >> 2
 				}
 
 				kcp.rttSN = kcp.sendNext
@@ -318,6 +320,7 @@ func (kcp *KCP) updateACK2(rtt uint32) {
 	kcp.rxSRTT = max(1, srtt)
 	rto := kcp.rxSRTT*1 + 4*kcp.mdev
 	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MIN)
+	return kcp.rxRTO
 }
 
 func (kcp *KCP) setSendUNA() {
@@ -488,7 +491,8 @@ func (kcp *KCP) Input(data []byte) int {
 		switch uint32(cmd) {
 		case KCP_CMD_ACK:
 			if timediff(currentTime, ts) >= 0 {
-				kcp.updateACK(uint32(timediff(currentTime, ts)))
+				rto := kcp.updateACK(uint32(timediff(currentTime, ts)))
+				kcp.Stat.RTOs = append(kcp.Stat.RTOs, rto)
 			}
 			kcp.parseACK(sn)
 			kcp.setSendUNA()
@@ -752,7 +756,7 @@ func (kcp *KCP) flush() {
 			}
 
 			if sendSegment.xmit >= kcp.deadLink {
-				kcp.state = -1
+				kcp.state = 0xFFFFFFFF
 			}
 		}
 	}
