@@ -80,6 +80,10 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.fastACKLimit = KCP_FASTACK_LIMIT
 	kcp.deadLink = KCP_DEADLINK
 	kcp.buffer = NewBuffer(int(kcp.mtu+KCP_OVERHEAD) * 3)
+	kcp.Stat = newStats()
+
+	kcp.rxMinRTO = 10
+	kcp.fastResendACK = 1
 	return kcp
 }
 
@@ -140,8 +144,7 @@ func (kcp *KCP) Recv(buffer []byte) int {
 	for idx := range kcp.recvQueue {
 		seg := kcp.recvQueue[idx]
 		frg := seg.frg
-		copy(buffer, seg.dataBuffer)
-		buffer = buffer[:len(seg.dataBuffer)]
+		copy(buffer[n:], seg.dataBuffer)
 		n += len(seg.dataBuffer)
 		count++
 
@@ -693,7 +696,7 @@ func (kcp *KCP) flush() {
 	if kcp.fastResendACK > 0 {
 		resent = kcp.fastResendACK
 	} else {
-		resent = 0xffffffff
+		resent = 0xFFFFFFFF
 	}
 
 	var minRTO uint32
@@ -750,7 +753,7 @@ func (kcp *KCP) flush() {
 				kcp.buffer.Reset()
 			}
 
-			kcp.buffer.WriteOverHeader(seg)
+			kcp.buffer.WriteOverHeader(sendSegment)
 			if len(sendSegment.dataBuffer) > 0 {
 				kcp.buffer.Write(sendSegment.dataBuffer)
 			}
@@ -817,6 +820,7 @@ func (kcp *KCP) Update() {
 		if timediff(currentTime, kcp.tsFlush) >= 0 {
 			kcp.tsFlush = currentTime + kcp.interval
 		}
+
 		kcp.flush()
 	}
 }
@@ -906,7 +910,7 @@ func (kcp *KCP) SetNoDelay(noDelay, interval, resend int, nc bool) {
 		}
 	}
 
-	kcp.SetMTU(interval)
+	kcp.SetInterval(interval)
 	kcp.fastResendACK = uint32(resend)
 	kcp.nocwnd = nc
 }
@@ -916,8 +920,24 @@ func (kcp *KCP) SetWndSize(sendWnd, recvWnd int) {
 	kcp.recvWnd = max(uint32(recvWnd), KCP_WND_RCV)
 }
 
+func (kcp *KCP) SendWnd() uint32 {
+	return kcp.sendWnd
+}
+
+func (kcp *KCP) RemoteWnd() uint32 {
+	return kcp.remoteWnd
+}
+
 func (kcp *KCP) WaitSend() int {
 	return len(kcp.sendQueue) + len(kcp.sendBuffer)
+}
+
+func (kcp *KCP) Mtu() uint32 {
+	return kcp.mtu
+}
+
+func (kcp *KCP) Mss() uint32 {
+	return kcp.mss
 }
 
 func (kcp *KCP) output(data []byte) {
