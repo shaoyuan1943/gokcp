@@ -41,7 +41,7 @@ type KCP struct {
 	sendUNA, sendNext, recvNext         uint32
 	recent, lastACK                     uint32
 	ssthresh                            uint32
-	rxRTTValue, rxSRTT, rxRTO, rxMinRTO uint32
+	rxRTTValue, rxSRTT, rxRTO, rxMinRTO int32
 	sendWnd, recvWnd, remoteWnd, cwnd   uint32
 	interval, tsFlush, xmit             uint32
 	noDelay                             bool
@@ -55,7 +55,8 @@ type KCP struct {
 	fastResendACK, fastACKLimit         uint32
 	nocwnd, streamMode                  bool
 	outputCallback                      OutputCallback
-	mdev, mdevMax, rttSN                uint32
+	mdev, mdevMax, rttSN                int32
+	stableNetwork                       bool
 	Stat                                *Stats
 }
 
@@ -72,8 +73,8 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.remoteWnd = KCP_WND_RCV
 	kcp.mtu = KCP_MTU_DEF
 	kcp.mss = kcp.mtu - KCP_OVERHEAD
-	kcp.rxRTO = KCP_RTO_DEF
-	kcp.rxMinRTO = KCP_RTO_MIN
+	kcp.rxRTO = int32(KCP_RTO_DEF)
+	kcp.rxMinRTO = int32(KCP_RTO_MIN)
 	kcp.interval = KCP_INTERVAL
 	kcp.tsFlush = KCP_INTERVAL
 	kcp.ssthresh = KCP_THRESH_INIT
@@ -82,8 +83,6 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.buffer = NewBuffer(int(kcp.mtu+KCP_OVERHEAD) * 3)
 	kcp.Stat = newStats()
 
-	kcp.rxMinRTO = 10
-	kcp.fastResendACK = 1
 	return kcp
 }
 
@@ -253,9 +252,17 @@ func (kcp *KCP) Send(buffer []byte) int {
 	return 0
 }
 
+func (kcp *KCP) updateACK(rtt int32) int32 {
+	if kcp.stableNetwork {
+		return kcp.updateACK2(rtt)
+	}
+
+	return kcp.updateACK1(rtt)
+}
+
 // calculate RTO
 // RFC6298：http://tools.ietf.org/html/rfc6298
-func (kcp *KCP) updateACK(rtt uint32) uint32 {
+func (kcp *KCP) updateACK1(rtt int32) int32 {
 	if kcp.rxSRTT == 0 {
 		kcp.rxSRTT = rtt
 		kcp.rxRTTValue = rtt >> 1 // 1/2
@@ -272,23 +279,23 @@ func (kcp *KCP) updateACK(rtt uint32) uint32 {
 		}
 	}
 
-	rto := kcp.rxSRTT + max(kcp.interval, 4*kcp.rxRTTValue)
-	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MAX)
+	rto := kcp.rxSRTT + int32(max(kcp.interval, uint32(4*kcp.rxRTTValue)))
+	kcp.rxRTO = int32(bound(uint32(kcp.rxMinRTO), uint32(rto), KCP_RTO_MAX))
 	return kcp.rxRTO
 }
 
 // calculate RTO
 // updateACK2 port from tcp_input.c 'tcp_rtt_estimator' function
 // https://github.com/torvalds/linux/blob/master/net/ipv4/tcp_input.c
-func (kcp *KCP) updateACK2(rtt uint32) uint32 {
+func (kcp *KCP) updateACK2(rtt int32) int32 {
 	srtt := kcp.rxSRTT
 	m := rtt
 	if kcp.rxSRTT == 0 {
 		srtt = m << 3
 		kcp.mdev = m << 1 // make sure rto = 3*rtt
-		kcp.rxRTTValue = max(kcp.mdev, KCP_RTO_MIN)
+		kcp.rxRTTValue = int32(max(uint32(kcp.mdev), KCP_RTO_MIN))
 		kcp.mdevMax = kcp.rxRTTValue
-		kcp.rttSN = kcp.sendNext
+		kcp.rttSN = int32(kcp.sendNext)
 	} else {
 		m -= srtt >> 3
 		srtt += m // rtt = 7/8 rtt + 1/8 new
@@ -309,20 +316,21 @@ func (kcp *KCP) updateACK2(rtt uint32) uint32 {
 				kcp.rxRTTValue = kcp.mdevMax
 			}
 
-			if kcp.sendUNA > kcp.rttSN {
+			if int32(kcp.sendUNA) > kcp.rttSN {
 				if kcp.mdevMax < kcp.rxRTTValue {
 					kcp.rxRTTValue -= (kcp.rxRTTValue - kcp.mdevMax) >> 2
 				}
 
-				kcp.rttSN = kcp.sendNext
-				kcp.mdevMax = KCP_RTO_MIN
+				kcp.rttSN = int32(kcp.sendNext)
+				kcp.mdevMax = int32(KCP_RTO_MIN)
 			}
 		}
 	}
 
-	kcp.rxSRTT = max(1, srtt)
-	rto := kcp.rxSRTT*1 + 4*kcp.mdev
-	kcp.rxRTO = bound(kcp.rxMinRTO, rto, KCP_RTO_MIN)
+	kcp.rxSRTT = int32(max(1, uint32(srtt)))
+	//rto := kcp.rxSRTT*1 + 4*kcp.mdev
+	rto := rtt + 4*kcp.mdev
+	kcp.rxRTO = int32(bound(uint32(kcp.rxMinRTO), uint32(rto), KCP_RTO_MAX))
 	return kcp.rxRTO
 }
 
@@ -494,7 +502,7 @@ func (kcp *KCP) Input(data []byte) int {
 		switch uint32(cmd) {
 		case KCP_CMD_ACK:
 			if timediff(currentTime, ts) >= 0 {
-				rto := kcp.updateACK(uint32(timediff(currentTime, ts)))
+				rto := kcp.updateACK(timediff(currentTime, ts))
 				kcp.Stat.RTOs = append(kcp.Stat.RTOs, rto)
 			}
 			kcp.parseACK(sn)
@@ -525,10 +533,12 @@ func (kcp *KCP) Input(data []byte) int {
 					seg.una = una
 					repeat := kcp.parseData(seg)
 					if !repeat {
+						// delay copy
 						if length > 0 {
 							copy(seg.dataBuffer, data[:length])
 						}
 					} else {
+						// repeat packet, throw it away
 						putSegment(seg)
 					}
 				}
@@ -680,7 +690,7 @@ func (kcp *KCP) flush() {
 		newseg.sn = kcp.sendNext
 		newseg.una = kcp.recvNext
 		newseg.resendTs = currentTime
-		newseg.rto = kcp.rxRTO
+		newseg.rto = uint32(kcp.rxRTO)
 		newseg.fastACK = 0
 		newseg.xmit = 0
 		kcp.sendBuffer = append(kcp.sendBuffer, newseg)
@@ -701,7 +711,7 @@ func (kcp *KCP) flush() {
 
 	var minRTO uint32
 	if !kcp.noDelay {
-		minRTO = kcp.rxRTO >> 3
+		minRTO = uint32(kcp.rxRTO >> 3)
 	} else {
 		minRTO = 0
 	}
@@ -720,16 +730,16 @@ func (kcp *KCP) flush() {
 		if sendSegment.xmit == 0 {
 			needSend = true
 			sendSegment.xmit++
-			sendSegment.rto = kcp.rxRTO
+			sendSegment.rto = uint32(kcp.rxRTO)
 			sendSegment.resendTs = currentTime + sendSegment.rto + minRTO
 		} else if timediff(currentTime, sendSegment.resendTs) >= 0 {
 			needSend = true
 			sendSegment.xmit++
 			kcp.xmit++
 			if !kcp.noDelay {
-				sendSegment.rto += kcp.rxRTO
+				sendSegment.rto += uint32(kcp.rxRTO)
 			} else {
-				sendSegment.rto += kcp.rxRTO / 2
+				sendSegment.rto += uint32(kcp.rxRTO / 2)
 			}
 			sendSegment.resendTs = currentTime + sendSegment.rto
 			lost = true
@@ -768,6 +778,7 @@ func (kcp *KCP) flush() {
 	if kcp.buffer.Len() > 0 {
 		kcp.output(kcp.buffer.Data())
 		kcp.buffer.Reset()
+
 	}
 
 	// update ssthresh
@@ -900,14 +911,12 @@ func (kcp *KCP) Check() uint32 {
 	return currentTime + uint32(minimal)
 }
 
-func (kcp *KCP) SetNoDelay(noDelay, interval, resend int, nc bool) {
-	if noDelay >= 0 {
-		kcp.noDelay = true
-		if noDelay > 0 {
-			kcp.rxMinRTO = KCP_RTO_NDL
-		} else {
-			kcp.rxMinRTO = KCP_RTO_MIN
-		}
+func (kcp *KCP) SetNoDelay(noDelay bool, interval, resend int, nc bool) {
+	kcp.noDelay = noDelay
+	if kcp.noDelay {
+		kcp.rxMinRTO = int32(KCP_RTO_NDL)
+	} else {
+		kcp.rxMinRTO = int32(KCP_RTO_MIN)
 	}
 
 	kcp.SetInterval(interval)
@@ -938,6 +947,10 @@ func (kcp *KCP) Mtu() uint32 {
 
 func (kcp *KCP) Mss() uint32 {
 	return kcp.mss
+}
+
+func (kcp *KCP) SetStableNetwork(stable bool) {
+	kcp.stableNetwork = stable
 }
 
 func (kcp *KCP) output(data []byte) {
