@@ -572,6 +572,7 @@ func (kcp *KCP) Input(data []byte) int {
 					kcp.incr = mss
 				}
 
+				// like tcp
 				kcp.incr += (mss*mss)/kcp.incr + (mss / 16)
 				if (kcp.cwnd+1)*mss <= kcp.incr {
 					var tmpVar uint32 = 1
