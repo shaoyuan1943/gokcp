@@ -12,7 +12,7 @@ type Buffer struct {
 func NewBuffer(size int) *Buffer {
 	b := &Buffer{
 		buffer:    make([]byte, size),
-		segBuffer: make([]byte, 24),
+		segBuffer: make([]byte, KCP_OVERHEAD),
 	}
 
 	b.buffer = b.buffer[:0]

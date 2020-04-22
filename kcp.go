@@ -62,7 +62,7 @@ type KCP struct {
 
 var startTime time.Time = time.Now()
 
-func millisecond() uint32 {
+func CurrentMS() uint32 {
 	return uint32(time.Now().Sub(startTime) / time.Millisecond)
 }
 
@@ -118,18 +118,18 @@ func (kcp *KCP) PeekSize() (size int) {
 
 // read a whole message packet
 // User or upper level recv: returns size, returns below zero for EAGAIN
-func (kcp *KCP) Recv(buffer []byte) int {
+func (kcp *KCP) Recv(buffer []byte) (int, error) {
 	if len(kcp.recvQueue) == 0 {
-		return -1
+		return 0, ErrNoReadableData
 	}
 
 	peekSize := kcp.PeekSize()
 	if peekSize < 0 {
-		return -1
+		return 0, ErrNoReadableData
 	}
 
 	if peekSize > len(buffer) {
-		return -3
+		return 0, ErrNoEnoughSpace
 	}
 
 	isFastRecover := false
@@ -181,12 +181,12 @@ func (kcp *KCP) Recv(buffer []byte) int {
 		kcp.probe |= KCP_ASK_TELL
 	}
 
-	return n
+	return n, nil
 }
 
-func (kcp *KCP) Send(buffer []byte) int {
+func (kcp *KCP) Send(buffer []byte) error {
 	if len(buffer) == 0 {
-		return -1
+		return ErrDataLenInvalid
 	}
 	// append to previous segment in streaming mode (if possible)
 	if kcp.streamMode {
@@ -210,7 +210,7 @@ func (kcp *KCP) Send(buffer []byte) int {
 		}
 
 		if len(buffer) == 0 {
-			return 0
+			return nil
 		}
 	}
 
@@ -222,7 +222,7 @@ func (kcp *KCP) Send(buffer []byte) int {
 	}
 
 	if count >= int(KCP_WND_RCV) {
-		return -2
+		return ErrDataLenInvalid
 	}
 
 	if count == 0 {
@@ -249,7 +249,7 @@ func (kcp *KCP) Send(buffer []byte) int {
 		buffer = buffer[size:]
 	}
 
-	return 0
+	return nil
 }
 
 func (kcp *KCP) updateACK(rtt int32) int32 {
@@ -457,16 +457,16 @@ func (kcp *KCP) parseData(newseg *segment) bool {
 	return repeat
 }
 
-func (kcp *KCP) Input(data []byte) int {
+func (kcp *KCP) Input(data []byte) error {
 	prevUNA := kcp.sendUNA
 	var maxACK, latestTs uint32 = 0, 0
 	flag := 0
 
 	if len(data) < int(KCP_OVERHEAD) {
-		return -1
+		return ErrDataLenInvalid
 	}
 
-	currentTime := millisecond()
+	currentTime := CurrentMS()
 	for {
 		var ts, sn, length, una, convID uint32
 		var wnd uint16
@@ -477,7 +477,7 @@ func (kcp *KCP) Input(data []byte) int {
 
 		data = decode32u(data, &convID)
 		if convID != kcp.convID {
-			return -1
+			return ErrDifferenceConvID
 		}
 		data = decode8u(data, &cmd)
 		data = decode8u(data, &frg)
@@ -488,12 +488,12 @@ func (kcp *KCP) Input(data []byte) int {
 		data = decode32u(data, &length)
 
 		if len(data) < int(length) || length < 0 {
-			return -2
+			return ErrDataLenInvalid
 		}
 
 		if uint32(cmd) != KCP_CMD_PUSH && uint32(cmd) != KCP_CMD_ACK &&
 			uint32(cmd) != KCP_CMD_WASK && uint32(cmd) != KCP_CMD_WINS {
-			return -3
+			return ErrDataInvalid
 		}
 
 		kcp.remoteWnd = uint32(wnd)
@@ -550,7 +550,7 @@ func (kcp *KCP) Input(data []byte) int {
 		case KCP_CMD_WINS:
 			// do nothing
 		default:
-			return -3
+			return ErrDataInvalid
 		}
 
 		data = data[length:]
@@ -590,11 +590,11 @@ func (kcp *KCP) Input(data []byte) int {
 		}
 	}
 
-	return 0
+	return nil
 }
 
 func (kcp *KCP) flush() {
-	currentTime := millisecond()
+	currentTime := CurrentMS()
 
 	if kcp.updated == 0 {
 		return
@@ -815,7 +815,7 @@ func (kcp *KCP) flush() {
 // 'Check' when to call it again (without Input/Send calling).
 //---------------------------------------------------------------------
 func (kcp *KCP) Update() {
-	currentTime := millisecond()
+	currentTime := CurrentMS()
 	if kcp.updated == 0 {
 		kcp.updated = 1
 		kcp.tsFlush = currentTime
@@ -870,7 +870,7 @@ func (kcp *KCP) SetInterval(interval int) {
 // wiki: https://github.com/skywind3000/kcp/wiki/KCP-Best-Practice
 //---------------------------------------------------------------------
 func (kcp *KCP) Check() uint32 {
-	currentTime := millisecond()
+	currentTime := CurrentMS()
 	if kcp.updated == 0 {
 		return currentTime
 	}
