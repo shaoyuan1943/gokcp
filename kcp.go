@@ -87,7 +87,9 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 }
 
 func (kcp *KCP) SetOutput(outputCallback OutputCallback) {
-	kcp.outputCallback = outputCallback
+	if outputCallback != nil {
+		kcp.outputCallback = outputCallback
+	}
 }
 
 // calculate a message data size
@@ -948,10 +950,6 @@ func (kcp *KCP) Mtu() uint32 {
 
 func (kcp *KCP) Mss() uint32 {
 	return kcp.mss
-}
-
-func (kcp *KCP) SetStableNetwork(stable bool) {
-	kcp.stableNetwork = stable
 }
 
 func (kcp *KCP) output(data []byte) {
