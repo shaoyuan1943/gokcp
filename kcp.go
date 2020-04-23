@@ -952,6 +952,14 @@ func (kcp *KCP) Mss() uint32 {
 	return kcp.mss
 }
 
+func (kcp *KCP) SetStreamMode(streamMode bool) {
+	kcp.streamMode = streamMode
+}
+
+func (kcp *KCP) IsStreamMode() bool {
+	return kcp.streamMode
+}
+
 func (kcp *KCP) output(data []byte) {
 	if len(data) <= 0 {
 		return
