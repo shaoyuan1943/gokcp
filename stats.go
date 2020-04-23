@@ -1,7 +1,7 @@
 package gokcp
 
 type Stats struct {
-	RTOs []uint32
+	RTOs []int32
 }
 
 func newStats() *Stats {
