@@ -80,7 +80,6 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.ssthresh = KCP_THRESH_INIT
 	kcp.fastACKLimit = KCP_FASTACK_LIMIT
 	kcp.deadLink = KCP_DEADLINK
-	kcp.buffer = NewBuffer(int(kcp.mtu+KCP_OVERHEAD) * 3)
 	kcp.Stat = newStats()
 
 	return kcp
@@ -90,6 +89,16 @@ func (kcp *KCP) SetOutput(outputCallback OutputCallback) {
 	if outputCallback != nil {
 		kcp.outputCallback = outputCallback
 	}
+}
+
+func (kcp *KCP) SetBufferReserved(reserved int) bool {
+	if reserved < 0 || reserved >= int(kcp.mtu-KCP_OVERHEAD) {
+		return false
+	}
+
+	kcp.mss = kcp.mtu - KCP_OVERHEAD - uint32(reserved)
+	kcp.buffer = NewBuffer(int(kcp.mtu), reserved)
+	return true
 }
 
 // calculate a message data size
@@ -595,7 +604,7 @@ func (kcp *KCP) Input(data []byte) error {
 	return nil
 }
 
-func (kcp *KCP) flush() {
+func (kcp *KCP) flush(isClose bool) {
 	currentTime := CurrentMS()
 
 	if kcp.updated == 0 {
@@ -614,15 +623,17 @@ func (kcp *KCP) flush() {
 	seg.sn = 0
 	seg.ts = 0
 
-	// flush acknowledges
-	for idx := range kcp.ackList {
-		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-			kcp.output(kcp.buffer.Data())
-			kcp.buffer.Reset()
-		}
+	if !isClose {
+		// flush acknowledges
+		for idx := range kcp.ackList {
+			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.RawData())
+				kcp.buffer.Reset()
+			}
 
-		seg.sn, seg.ts = unpackACK(kcp.ackList[idx])
-		kcp.buffer.WriteOverHeader(seg)
+			seg.sn, seg.ts = unpackACK(kcp.ackList[idx])
+			kcp.buffer.WriteOverHeader(seg)
+		}
 	}
 	kcp.ackList = kcp.ackList[:0]
 
@@ -650,27 +661,29 @@ func (kcp *KCP) flush() {
 		kcp.probeWait = 0
 	}
 
-	// flush window probing commands
-	if (kcp.probe & KCP_ASK_SEND) != 0 {
-		seg.cmd = KCP_CMD_WASK
-		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-			kcp.output(kcp.buffer.Data())
-			kcp.buffer.Reset()
+	if !isClose {
+		// flush window probing commands
+		if (kcp.probe & KCP_ASK_SEND) != 0 {
+			seg.cmd = KCP_CMD_WASK
+			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.RawData())
+				kcp.buffer.Reset()
+			}
+
+			kcp.buffer.WriteOverHeader(seg)
 		}
 
-		kcp.buffer.WriteOverHeader(seg)
-	}
+		if (kcp.probe & KCP_ASK_TELL) != 0 {
+			seg.cmd = KCP_CMD_WINS
+			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.RawData())
+				kcp.buffer.Reset()
+			}
 
-	if (kcp.probe & KCP_ASK_TELL) != 0 {
-		seg.cmd = KCP_CMD_WINS
-		if kcp.buffer.Len()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-			kcp.output(kcp.buffer.Data())
-			kcp.buffer.Reset()
+			kcp.buffer.WriteOverHeader(seg)
 		}
-
-		kcp.buffer.WriteOverHeader(seg)
+		kcp.probe = 0
 	}
-	kcp.probe = 0
 
 	// calculate window size
 	cwnd := min(kcp.sendWnd, kcp.remoteWnd)
@@ -761,8 +774,8 @@ func (kcp *KCP) flush() {
 			sendSegment.wnd = seg.wnd
 			sendSegment.una = kcp.recvNext
 
-			if kcp.buffer.Len()+int(KCP_OVERHEAD)+len(sendSegment.dataBuffer) > int(kcp.mtu) {
-				kcp.output(kcp.buffer.Data())
+			if kcp.buffer.RawLen()+int(KCP_OVERHEAD)+len(sendSegment.dataBuffer) > int(kcp.mtu) {
+				kcp.output(kcp.buffer.RawData())
 				kcp.buffer.Reset()
 			}
 
@@ -779,7 +792,7 @@ func (kcp *KCP) flush() {
 
 	// flash remain segments
 	if kcp.buffer.Len() > 0 {
-		kcp.output(kcp.buffer.Data())
+		kcp.output(kcp.buffer.RawData())
 		kcp.buffer.Reset()
 
 	}
@@ -835,19 +848,24 @@ func (kcp *KCP) Update() {
 			kcp.tsFlush = currentTime + kcp.interval
 		}
 
-		kcp.flush()
+		kcp.flush(false)
 	}
 }
 
-func (kcp *KCP) SetMTU(mtu int) {
+func (kcp *KCP) SetMTU(mtu int, reserved int) bool {
+	if reserved < 0 || reserved >= int(kcp.mtu-KCP_OVERHEAD) {
+		return false
+	}
+
 	if mtu < 50 || mtu < int(KCP_OVERHEAD) {
-		return
+		return false
 	}
 
 	kcp.mtu = uint32(mtu)
-	kcp.mss = kcp.mtu - KCP_OVERHEAD
+	kcp.mss = kcp.mtu - KCP_OVERHEAD - uint32(reserved)
 	kcp.buffer = nil
-	kcp.buffer = NewBuffer((mtu + int(KCP_OVERHEAD)) * 3)
+	kcp.buffer = NewBuffer(int(kcp.mtu), reserved)
+	return true
 }
 
 func (kcp *KCP) SetInterval(interval int) {
@@ -966,4 +984,12 @@ func (kcp *KCP) output(data []byte) {
 	}
 
 	kcp.outputCallback(data)
+}
+
+func (kcp *KCP) FlushWhenClosed() {
+	kcp.flush(true)
+}
+
+func (kcp *KCP) ConvID() uint32 {
+	return kcp.convID
 }

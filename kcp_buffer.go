@@ -5,16 +5,21 @@ import (
 )
 
 type Buffer struct {
+	srcBuffer []byte
 	buffer    []byte
 	segBuffer []byte
+	reserved  int
 }
 
-func NewBuffer(size int) *Buffer {
+func NewBuffer(size int, reserved int) *Buffer {
 	b := &Buffer{
 		buffer:    make([]byte, size),
 		segBuffer: make([]byte, KCP_OVERHEAD),
 	}
 
+	b.reserved = reserved
+	b.srcBuffer = b.buffer
+	b.buffer = b.buffer[reserved:]
 	b.buffer = b.buffer[:0]
 	return b
 }
@@ -48,6 +53,14 @@ func (b *Buffer) Data() []byte {
 	return b.buffer
 }
 
+func (b *Buffer) RawData() []byte {
+	return b.srcBuffer[:len(b.buffer)+b.reserved]
+}
+
 func (b *Buffer) Len() int {
 	return len(b.buffer)
+}
+
+func (b *Buffer) RawLen() int {
+	return len(b.buffer) + b.reserved
 }
