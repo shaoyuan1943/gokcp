@@ -452,7 +452,7 @@ func (kcp *KCP) parseData(newseg *segment) bool {
 	count := 0
 	for idx := range kcp.recvBuffer {
 		seg := kcp.recvBuffer[idx]
-		if seg.sn == kcp.recvNext && len(kcp.recvBuffer) < int(kcp.recvWnd) {
+		if seg.sn == kcp.recvNext && len(kcp.recvQueue) < int(kcp.recvWnd) {
 			count++
 			kcp.recvNext++
 		} else {
@@ -464,11 +464,11 @@ func (kcp *KCP) parseData(newseg *segment) bool {
 		kcp.recvQueue = append(kcp.recvQueue, kcp.recvBuffer[:count]...)
 		kcp.recvBuffer = removeFront(kcp.recvBuffer, count)
 	}
-
 	return repeat
 }
 
 func (kcp *KCP) Input(data []byte) error {
+	kcp.Stat.DataInputTimes++
 	prevUNA := kcp.sendUNA
 	var maxACK, latestTs uint32 = 0, 0
 	flag := 0
@@ -611,6 +611,8 @@ func (kcp *KCP) flush(isClose bool) {
 		return
 	}
 
+	kcp.Stat.FlushTimes++
+
 	seg := &segment{}
 	seg.convID = kcp.convID
 	seg.cmd = KCP_CMD_ACK
@@ -633,6 +635,7 @@ func (kcp *KCP) flush(isClose bool) {
 
 			seg.sn, seg.ts = unpackACK(kcp.ackList[idx])
 			kcp.buffer.WriteOverHeader(seg)
+			kcp.Stat.SendedACK++
 		}
 	}
 	kcp.ackList = kcp.ackList[:0]
@@ -783,6 +786,7 @@ func (kcp *KCP) flush(isClose bool) {
 			if len(sendSegment.dataBuffer) > 0 {
 				kcp.buffer.Write(sendSegment.dataBuffer)
 			}
+			kcp.Stat.SendedDataCount++
 
 			if sendSegment.xmit >= kcp.deadLink {
 				kcp.state = 0xFFFFFFFF
