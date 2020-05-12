@@ -12,12 +12,12 @@ type segment struct {
 	ts         uint32 // send message timestamp
 	sn         uint32 // sequence number
 	una        uint32 // next message sequence number
-	resendTs   uint32
+	resendTs   uint32 // send time stamp
 	rto        uint32
-	fastACK    uint32
+	fastACK    uint32 // skip ACK times
 	xmit       uint32
 	dataBuffer []byte
-	acked      bool
+	acked      bool // flag this segment ack incept
 }
 
 func (seg *segment) reset() {
@@ -490,6 +490,7 @@ func (kcp *KCP) Input(data []byte) error {
 		if convID != kcp.convID {
 			return ErrDifferenceConvID
 		}
+
 		data = decode8u(data, &cmd)
 		data = decode8u(data, &frg)
 		data = decode16u(data, &wnd)
@@ -697,6 +698,8 @@ func (kcp *KCP) flush(isClose bool) {
 	// move data from sendQueue to sendBuffer
 	count := 0
 	for idx := 0; idx < len(kcp.sendQueue); idx++ {
+		// flow control
+		// too many package are not ACKed maybe the net is crowd, so send this message next time
 		if timediff(kcp.sendNext, kcp.sendUNA+cwnd) >= 0 {
 			break
 		}
@@ -819,6 +822,7 @@ func (kcp *KCP) flush(isClose bool) {
 		if kcp.ssthresh < KCP_THRESH_MIN {
 			kcp.ssthresh = KCP_THRESH_MIN
 		}
+
 		kcp.cwnd = 1
 		kcp.incr = kcp.mss
 	}
@@ -883,14 +887,14 @@ func (kcp *KCP) SetInterval(interval int) {
 }
 
 //---------------------------------------------------------------------
-// Determine when should you invoke ikcp_update:
-// returns when you should invoke ikcp_update in millisec, if there
-// is no ikcp_input/_send calling. you can call ikcp_update in that
+// Determine when should you invoke Update:
+// returns when you should invoke Update in millisec, if there
+// is no Input/Send calling. you can call Update in that
 // time, instead of call update repeatly.
 
-// Important to reduce unnacessary ikcp_update invoking. use it to
-// schedule ikcp_update (eg. implementing an epoll-like mechanism,
-// or optimize ikcp_update when handling massive kcp connections)
+// Important to reduce unnacessary Update invoking. use it to
+// schedule Update (eg. implementing an epoll-like mechanism,
+// or optimize Update when handling massive kcp connections)
 // wiki: https://github.com/skywind3000/kcp/wiki/KCP-Best-Practice
 //---------------------------------------------------------------------
 func (kcp *KCP) Check() uint32 {
