@@ -1,7 +1,7 @@
 package gokcp
 
 import (
-	"time"
+	_ "unsafe"
 )
 
 type segment struct {
@@ -60,10 +60,15 @@ type KCP struct {
 	Stat                                *Stats
 }
 
-var startTime time.Time = time.Now()
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
+
+const nsToMs = 1000 * 1000
+
+var startTime = nanotime()
 
 func CurrentMS() uint32 {
-	return uint32(time.Now().Sub(startTime) / time.Millisecond)
+	return uint32((nanotime() - startTime) / nsToMs)
 }
 
 func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
