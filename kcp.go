@@ -60,17 +60,6 @@ type KCP struct {
 	Stat                                *Stats
 }
 
-//go:linkname nanotime runtime.nanotime
-func nanotime() int64
-
-const nsToMs = 1000 * 1000
-
-var startTime = nanotime()
-
-func CurrentMS() uint32 {
-	return uint32((nanotime() - startTime) / nsToMs)
-}
-
 func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp := &KCP{convID: convID, outputCallback: outputCallbakc}
 	kcp.sendWnd = KCP_WND_SND

@@ -1,5 +1,9 @@
 package gokcp
 
+import (
+	_ "unsafe"
+)
+
 const (
 	KCP_RTO_NDL       uint32 = 30    // no delay model min rto
 	KCP_RTO_MIN       uint32 = 100   // normal model min rto
@@ -49,4 +53,13 @@ func removeFront(p []*segment, count int) []*segment {
 	}
 
 	return p
+}
+
+//go:linkname nanotime runtime.nanotime
+func nanotime() int64
+
+var startTime = nanotime()
+
+func CurrentMS() uint32 {
+	return uint32((nanotime() - startTime) / 1000 * 1000)
 }

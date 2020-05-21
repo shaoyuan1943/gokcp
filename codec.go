@@ -63,5 +63,5 @@ func encodeSegment(data []byte, seg *segment) []byte {
 	rawseg = encode32u(rawseg, seg.sn)                      // 4
 	rawseg = encode32u(rawseg, seg.una)                     // 4
 	rawseg = encode32u(rawseg, uint32(len(seg.dataBuffer))) // 4
-	return rawseg
+	return rawseg                                           // total 24
 }
