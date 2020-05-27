@@ -11,7 +11,7 @@ type segment struct {
 	wnd        uint32 // recv window size
 	ts         uint32 // send message timestamp
 	sn         uint32 // sequence number
-	una        uint32 // next message sequence number
+	una        uint32 // next message sequence number(recv)
 	resendTs   uint32 // send time stamp
 	rto        uint32
 	fastACK    uint32 // skip ACK times
@@ -400,13 +400,8 @@ func (kcp *KCP) parseFastACK(sn uint32, ts uint32) {
 	}
 }
 
-func (kcp *KCP) ackPush(sn, ts uint32) {
+func (kcp *KCP) pushACK(sn, ts uint32) {
 	kcp.ackList = append(kcp.ackList, packACK(sn, ts))
-}
-
-func (kcp *KCP) getACK(idx int) (sn, ts uint32) {
-	sn, ts = unpackACK(kcp.ackList[idx])
-	return
 }
 
 // Return true if this message been received
@@ -526,7 +521,7 @@ func (kcp *KCP) Input(data []byte) error {
 			}
 		case KCP_CMD_PUSH:
 			if timediff(sn, kcp.recvNext+kcp.recvWnd) < 0 {
-				kcp.ackPush(sn, ts)
+				kcp.pushACK(sn, ts)
 				if timediff(sn, kcp.recvNext) >= 0 {
 					seg := getSegment()
 					seg.dataBuffer = seg.dataBuffer[:length]
