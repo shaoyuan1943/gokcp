@@ -1,6 +1,8 @@
 package gokcp
 
 import (
+	"fmt"
+	"strings"
 	_ "unsafe"
 )
 
@@ -989,4 +991,16 @@ func (kcp *KCP) FlushWhenClosed() {
 
 func (kcp *KCP) ConvID() uint32 {
 	return kcp.convID
+}
+
+func (kcp *KCP) Snapshot() string {
+	var sb strings.Builder
+	sb.WriteString("**********************************************************")
+	sb.WriteString(fmt.Sprintf("sendUNA: %v, sendNext: %v, recvNext: %v\n", kcp.sendUNA, kcp.sendNext, kcp.recvNext))
+	sb.WriteString(fmt.Sprintf("recent: %v, lastACK: %v, ssthresh: %v\n", kcp.recent, kcp.lastACK, kcp.ssthresh))
+	sb.WriteString(fmt.Sprintf("fastResendACK: %v, fastACKLimit: %v\n", kcp.fastResendACK, kcp.fastACKLimit))
+	sb.WriteString(fmt.Sprintf("sendWnd: %v, recvWnd: %v, remoteWnd: %v, cwnd: %v\n", kcp.sendWnd, kcp.recvWnd, kcp.remoteWnd, kcp.cwnd))
+	sb.WriteString(fmt.Sprintf("sendQueueLen: %v, sendBufferLen: %v, recvQueueLen: %v, recvBufferLen: %v\n", len(kcp.sendQueue), len(kcp.sendBuffer), len(kcp.recvQueue), len(kcp.recvBuffer)))
+	sb.WriteString("**********************************************************")
+	return sb.String()
 }
