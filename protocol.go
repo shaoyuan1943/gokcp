@@ -1,6 +1,8 @@
 package gokcp
 
 import (
+	"sync/atomic"
+	"time"
 	_ "unsafe"
 )
 
@@ -59,7 +61,17 @@ func removeFront(p []*segment, count int) []*segment {
 func nanotime() int64
 
 var startTime = nanotime()
+var useUnixTimestamp atomic.Value
 
 func CurrentMS() uint32 {
+	if useUnixTimestamp.Load() != nil && useUnixTimestamp.Load().(bool) == true {
+		return uint32(time.Now().Unix())
+	}
+
 	return uint32((nanotime() - startTime) / 1000 * 1000)
+}
+
+// MUST invoke this function in single goroutinue before KCP start
+func UseUnixTimestamp() {
+	useUnixTimestamp.Store(true)
 }

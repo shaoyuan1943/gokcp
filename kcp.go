@@ -406,7 +406,7 @@ func (kcp *KCP) pushACK(sn, ts uint32) {
 	kcp.ackList = append(kcp.ackList, packACK(sn, ts))
 }
 
-// Return true if this message been received
+// Return true if this message has been received
 func (kcp *KCP) parseData(newseg *segment) bool {
 	repeat := false
 	sn := newseg.sn
