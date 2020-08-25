@@ -1,8 +1,6 @@
 package gokcp
 
 import (
-	"fmt"
-	"strings"
 	_ "unsafe"
 )
 
@@ -40,8 +38,8 @@ func (seg *segment) reset() {
 
 type KCP struct {
 	convID, mtu, mss, state             uint32
+	lastACK                             uint32
 	sendUNA, sendNext, recvNext         uint32
-	recent, lastACK                     uint32
 	ssthresh                            uint32
 	rxRTTValue, rxSRTT, rxRTO, rxMinRTO int32
 	sendWnd, recvWnd, remoteWnd, cwnd   uint32
@@ -59,7 +57,6 @@ type KCP struct {
 	outputCallback                      OutputCallback
 	mdev, mdevMax, rttSN                int32
 	stableNetwork                       bool
-	Stat                                *Stats
 }
 
 func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
@@ -76,7 +73,6 @@ func NewKCP(convID uint32, outputCallbakc OutputCallback) *KCP {
 	kcp.ssthresh = KCP_THRESH_INIT
 	kcp.fastACKLimit = KCP_FASTACK_LIMIT
 	kcp.deadLink = KCP_DEADLINK
-	kcp.Stat = newStats()
 
 	return kcp
 }
@@ -459,16 +455,15 @@ func (kcp *KCP) parseData(newseg *segment) bool {
 }
 
 func (kcp *KCP) Input(data []byte) error {
-	kcp.Stat.DataInputTimes++
 	prevUNA := kcp.sendUNA
-	var maxACK, latestTs uint32 = 0, 0
+	var maxACK, latestACKTime uint32 = 0, 0
 	flag := 0
 
 	if len(data) < int(KCP_OVERHEAD) {
 		return ErrDataLenInvalid
 	}
 
-	currentTime := CurrentMS()
+	currentTime := SetupFromNowMS()
 	for {
 		var ts, sn, length, una, convID uint32
 		var wnd uint16
@@ -505,8 +500,7 @@ func (kcp *KCP) Input(data []byte) error {
 		switch uint32(cmd) {
 		case KCP_CMD_ACK:
 			if timediff(currentTime, ts) >= 0 {
-				rto := kcp.updateACK(timediff(currentTime, ts))
-				kcp.Stat.RTOs = append(kcp.Stat.RTOs, rto)
+				_ = kcp.updateACK(timediff(currentTime, ts))
 			}
 			kcp.parseACK(sn)
 			kcp.setSendUNA()
@@ -514,11 +508,11 @@ func (kcp *KCP) Input(data []byte) error {
 			if flag == 0 {
 				flag = 1
 				maxACK = sn
-				latestTs = ts
+				latestACKTime = ts
 			} else {
 				if timediff(sn, maxACK) > 0 {
 					maxACK = sn
-					latestTs = ts
+					latestACKTime = ts
 				}
 			}
 		case KCP_CMD_PUSH:
@@ -560,7 +554,7 @@ func (kcp *KCP) Input(data []byte) error {
 	}
 
 	if flag != 0 {
-		kcp.parseFastACK(maxACK, latestTs)
+		kcp.parseFastACK(maxACK, latestACKTime)
 	}
 
 	// update local cwnd
@@ -597,13 +591,11 @@ func (kcp *KCP) Input(data []byte) error {
 }
 
 func (kcp *KCP) flush(isClose bool) {
-	currentTime := CurrentMS()
+	currentTime := SetupFromNowMS()
 
 	if kcp.updated == 0 {
 		return
 	}
-
-	kcp.Stat.FlushTimes++
 
 	seg := &segment{}
 	seg.convID = kcp.convID
@@ -627,7 +619,6 @@ func (kcp *KCP) flush(isClose bool) {
 
 			seg.sn, seg.ts = unpackACK(kcp.ackList[idx])
 			kcp.buffer.WriteOverHeader(seg)
-			kcp.Stat.SendedACK++
 		}
 	}
 	kcp.ackList = kcp.ackList[:0]
@@ -780,7 +771,6 @@ func (kcp *KCP) flush(isClose bool) {
 			if len(sendSegment.dataBuffer) > 0 {
 				kcp.buffer.Write(sendSegment.dataBuffer)
 			}
-			kcp.Stat.SendedDataCount++
 
 			if sendSegment.xmit >= kcp.deadLink {
 				kcp.state = 0xFFFFFFFF
@@ -792,7 +782,6 @@ func (kcp *KCP) flush(isClose bool) {
 	if kcp.buffer.Len() > 0 {
 		kcp.output(kcp.buffer.RawData())
 		kcp.buffer.Reset()
-
 	}
 
 	// update ssthresh
@@ -829,7 +818,7 @@ func (kcp *KCP) flush(isClose bool) {
 // 'Check' when to call it again (without Input/Send calling).
 //---------------------------------------------------------------------
 func (kcp *KCP) Update() {
-	currentTime := CurrentMS()
+	currentTime := SetupFromNowMS()
 	if kcp.updated == 0 {
 		kcp.updated = 1
 		kcp.tsFlush = currentTime
@@ -889,7 +878,7 @@ func (kcp *KCP) SetInterval(interval int) {
 // wiki: https://github.com/skywind3000/kcp/wiki/KCP-Best-Practice
 //---------------------------------------------------------------------
 func (kcp *KCP) Check() uint32 {
-	currentTime := CurrentMS()
+	currentTime := SetupFromNowMS()
 	if kcp.updated == 0 {
 		return currentTime
 	}
@@ -993,14 +982,48 @@ func (kcp *KCP) ConvID() uint32 {
 	return kcp.convID
 }
 
-func (kcp *KCP) Snapshot() string {
-	var sb strings.Builder
-	sb.WriteString("**********************************************************")
-	sb.WriteString(fmt.Sprintf("sendUNA: %v, sendNext: %v, recvNext: %v\n", kcp.sendUNA, kcp.sendNext, kcp.recvNext))
-	sb.WriteString(fmt.Sprintf("recent: %v, lastACK: %v, ssthresh: %v\n", kcp.recent, kcp.lastACK, kcp.ssthresh))
-	sb.WriteString(fmt.Sprintf("fastResendACK: %v, fastACKLimit: %v\n", kcp.fastResendACK, kcp.fastACKLimit))
-	sb.WriteString(fmt.Sprintf("sendWnd: %v, recvWnd: %v, remoteWnd: %v, cwnd: %v\n", kcp.sendWnd, kcp.recvWnd, kcp.remoteWnd, kcp.cwnd))
-	sb.WriteString(fmt.Sprintf("sendQueueLen: %v, sendBufferLen: %v, recvQueueLen: %v, recvBufferLen: %v\n", len(kcp.sendQueue), len(kcp.sendBuffer), len(kcp.recvQueue), len(kcp.recvBuffer)))
-	sb.WriteString("**********************************************************")
-	return sb.String()
+type KCPStatus struct {
+	SendUNA       int
+	SendNext      int
+	RecvNext      int
+	LastACK       int
+	Threshold     int
+	RTO           int
+	FastResendACK int
+	FastACKLimit  int
+	SendWnd       int
+	RecvWnd       int
+	RemoteWnd     int
+	Wnd           int
+	SendQueueLen  int
+	SendBufferLen int
+	RecvQueueLen  int
+	RecvBufferLen int
+	ACKListLen    int
+	Incr          int
+}
+
+func (kcp *KCP) Snapshot(status *KCPStatus) {
+	if status == nil {
+		return
+	}
+
+	status.SendUNA = int(kcp.sendUNA)
+	status.SendNext = int(kcp.sendNext)
+	status.RecvNext = int(kcp.recvNext)
+	status.LastACK = int(kcp.lastACK)
+	status.Threshold = int(kcp.ssthresh)
+	status.RTO = int(kcp.rxRTO)
+	status.FastResendACK = int(kcp.fastResendACK)
+	status.FastACKLimit = int(kcp.fastACKLimit)
+	status.SendWnd = int(kcp.sendWnd)
+	status.RecvWnd = int(kcp.recvWnd)
+	status.RemoteWnd = int(kcp.remoteWnd)
+	status.Wnd = int(kcp.cwnd)
+	status.SendQueueLen = len(kcp.sendQueue)
+	status.SendBufferLen = len(kcp.sendBuffer)
+	status.RecvQueueLen = len(kcp.recvQueue)
+	status.RecvBufferLen = len(kcp.recvBuffer)
+	status.ACKListLen = len(kcp.ackList)
+	status.Incr = int(kcp.incr)
 }

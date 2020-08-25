@@ -32,6 +32,16 @@ func decode32u(p []byte, l *uint32) []byte {
 	return p[4:]
 }
 
+func encode64u(p []byte, l uint64) []byte {
+	binary.LittleEndian.PutUint64(p, l)
+	return p[8:]
+}
+
+func decode64u(p []byte, l *uint64) []byte {
+	*l = binary.LittleEndian.Uint64(p)
+	return p[8:]
+}
+
 func min(a, b uint32) uint32 {
 	if a <= b {
 		return a
