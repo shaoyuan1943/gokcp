@@ -590,13 +590,12 @@ func (kcp *KCP) Input(data []byte) error {
 	return nil
 }
 
-func (kcp *KCP) flush(isClose bool) {
-	currentTime := SetupFromNowMS()
-
+func (kcp *KCP) flush(isClose bool) error {
 	if kcp.updated == 0 {
-		return
+		return nil
 	}
 
+	currentTime := SetupFromNowMS()
 	seg := &segment{}
 	seg.convID = kcp.convID
 	seg.cmd = KCP_CMD_ACK
@@ -613,7 +612,11 @@ func (kcp *KCP) flush(isClose bool) {
 		// flush acknowledges
 		for idx := range kcp.ackList {
 			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-				kcp.output(kcp.buffer.RawData())
+				err := kcp.outputCallback(kcp.buffer.RawData())
+				if err != nil {
+					return err
+				}
+
 				kcp.buffer.Reset()
 			}
 
@@ -652,7 +655,10 @@ func (kcp *KCP) flush(isClose bool) {
 		if (kcp.probe & KCP_ASK_SEND) != 0 {
 			seg.cmd = KCP_CMD_WASK
 			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-				kcp.output(kcp.buffer.RawData())
+				err := kcp.outputCallback(kcp.buffer.RawData())
+				if err != nil {
+					return err
+				}
 				kcp.buffer.Reset()
 			}
 
@@ -662,7 +668,10 @@ func (kcp *KCP) flush(isClose bool) {
 		if (kcp.probe & KCP_ASK_TELL) != 0 {
 			seg.cmd = KCP_CMD_WINS
 			if kcp.buffer.RawLen()+int(KCP_OVERHEAD) > int(kcp.mtu) {
-				kcp.output(kcp.buffer.RawData())
+				err := kcp.outputCallback(kcp.buffer.RawData())
+				if err != nil {
+					return err
+				}
 				kcp.buffer.Reset()
 			}
 
@@ -763,7 +772,10 @@ func (kcp *KCP) flush(isClose bool) {
 			sendSegment.una = kcp.recvNext
 
 			if kcp.buffer.RawLen()+int(KCP_OVERHEAD)+len(sendSegment.dataBuffer) > int(kcp.mtu) {
-				kcp.output(kcp.buffer.RawData())
+				err := kcp.outputCallback(kcp.buffer.RawData())
+				if err != nil {
+					return err
+				}
 				kcp.buffer.Reset()
 			}
 
@@ -780,7 +792,10 @@ func (kcp *KCP) flush(isClose bool) {
 
 	// flash remain segments
 	if kcp.buffer.Len() > 0 {
-		kcp.output(kcp.buffer.RawData())
+		err := kcp.outputCallback(kcp.buffer.RawData())
+		if err != nil {
+			return err
+		}
 		kcp.buffer.Reset()
 	}
 
@@ -811,13 +826,15 @@ func (kcp *KCP) flush(isClose bool) {
 		kcp.cwnd = 1
 		kcp.incr = kcp.mss
 	}
+
+	return nil
 }
 
 //---------------------------------------------------------------------
 // update state (call it repeatedly, every 10ms-100ms), or you can ask
 // 'Check' when to call it again (without Input/Send calling).
 //---------------------------------------------------------------------
-func (kcp *KCP) Update() {
+func (kcp *KCP) Update() error {
 	currentTime := SetupFromNowMS()
 	if kcp.updated == 0 {
 		kcp.updated = 1
@@ -836,8 +853,10 @@ func (kcp *KCP) Update() {
 			kcp.tsFlush = currentTime + kcp.interval
 		}
 
-		kcp.flush(false)
+		return kcp.flush(false)
 	}
+
+	return nil
 }
 
 func (kcp *KCP) SetMTU(mtu int, reserved int) bool {
@@ -966,20 +985,16 @@ func (kcp *KCP) IsStreamMode() bool {
 	return kcp.streamMode
 }
 
-func (kcp *KCP) output(data []byte) {
-	if len(data) <= 0 {
-		return
-	}
-
-	kcp.outputCallback(data)
-}
-
 func (kcp *KCP) FlushWhenClosed() {
 	kcp.flush(true)
 }
 
 func (kcp *KCP) ConvID() uint32 {
 	return kcp.convID
+}
+
+func (kcp *KCP) RTO() int32 {
+	return kcp.rxRTO
 }
 
 type KCPStatus struct {

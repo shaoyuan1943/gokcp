@@ -9,11 +9,6 @@ var (
 		s.dataBuffer = s.dataBuffer[:0]
 		return s
 	}}
-
-	bufferPool = sync.Pool{New: func() interface{} {
-		buffer := make([]byte, KCP_MTU_DEF)
-		return buffer
-	}}
 )
 
 func getSegment() *segment {

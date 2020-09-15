@@ -30,7 +30,7 @@ const (
 	KCP_FASTACK_LIMIT uint32 = 5      // max times to trigger fastack
 )
 
-type OutputCallback func(p []byte)
+type OutputCallback func(p []byte) error
 
 const PackBits = 32
 
