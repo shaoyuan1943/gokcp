@@ -83,16 +83,6 @@ func (kcp *KCP) SetOutput(outputCallback OutputCallback) {
 	}
 }
 
-func (kcp *KCP) SetBufferReserved(reserved int) bool {
-	if reserved < 0 || reserved >= int(kcp.mtu-KCP_OVERHEAD) {
-		return false
-	}
-
-	kcp.mss = kcp.mtu - KCP_OVERHEAD - uint32(reserved)
-	kcp.buffer = NewBuffer(int(kcp.mtu), reserved)
-	return true
-}
-
 // calculate a message data size
 func (kcp *KCP) PeekSize() (size int) {
 	if len(kcp.recvQueue) <= 0 {
@@ -859,19 +849,23 @@ func (kcp *KCP) Update() error {
 	return nil
 }
 
-func (kcp *KCP) SetMTU(mtu int, reserved int) bool {
+func (kcp *KCP) SetBufferReserved(reserved int) bool {
 	if reserved < 0 || reserved >= int(kcp.mtu-KCP_OVERHEAD) {
 		return false
 	}
 
+	kcp.mss = kcp.mtu - KCP_OVERHEAD - uint32(reserved)
+	kcp.buffer = nil
+	kcp.buffer = NewBuffer(int(kcp.mtu), reserved)
+	return true
+}
+
+func (kcp *KCP) SetMTU(mtu int) bool {
 	if mtu < 50 || mtu < int(KCP_OVERHEAD) {
 		return false
 	}
 
 	kcp.mtu = uint32(mtu)
-	kcp.mss = kcp.mtu - KCP_OVERHEAD - uint32(reserved)
-	kcp.buffer = nil
-	kcp.buffer = NewBuffer(int(kcp.mtu), reserved)
 	return true
 }
 
