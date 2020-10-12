@@ -86,7 +86,7 @@ func (kcp *KCP) SetOutput(outputCallback OutputCallback) {
 // calculate a message data size
 func (kcp *KCP) PeekSize() (size int) {
 	if len(kcp.recvQueue) <= 0 {
-		return -1
+		return 0
 	}
 
 	seg := kcp.recvQueue[0]
@@ -95,7 +95,7 @@ func (kcp *KCP) PeekSize() (size int) {
 	}
 
 	if len(kcp.recvQueue) < int(seg.frg+1) {
-		return -1
+		return 0
 	}
 
 	for idx := range kcp.recvQueue {
@@ -117,7 +117,7 @@ func (kcp *KCP) Recv(buffer []byte) (int, error) {
 	}
 
 	peekSize := kcp.PeekSize()
-	if peekSize < 0 {
+	if peekSize <= 0 {
 		return 0, ErrNoReadableData
 	}
 
@@ -178,9 +178,6 @@ func (kcp *KCP) Recv(buffer []byte) (int, error) {
 }
 
 func (kcp *KCP) Send(buffer []byte) error {
-	if len(buffer) == 0 {
-		return ErrDataLenInvalid
-	}
 	// append to previous segment in streaming mode (if possible)
 	if kcp.streamMode {
 		if len(kcp.sendQueue) > 0 {
@@ -215,7 +212,7 @@ func (kcp *KCP) Send(buffer []byte) error {
 	}
 
 	if count >= int(KCP_WND_RCV) {
-		return ErrDataLenInvalid
+		return ErrDataTooLong
 	}
 
 	if count == 0 {
@@ -450,7 +447,7 @@ func (kcp *KCP) Input(data []byte) error {
 	flag := 0
 
 	if len(data) < int(KCP_OVERHEAD) {
-		return ErrDataLenInvalid
+		return ErrDataInvalid
 	}
 
 	currentTime := SetupFromNowMS()
@@ -476,7 +473,7 @@ func (kcp *KCP) Input(data []byte) error {
 		data = decode32u(data, &length)
 
 		if len(data) < int(length) || length < 0 {
-			return ErrDataLenInvalid
+			return ErrDataInvalid
 		}
 
 		if uint32(cmd) != KCP_CMD_PUSH && uint32(cmd) != KCP_CMD_ACK &&
