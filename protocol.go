@@ -25,8 +25,8 @@ const (
 	KCP_DEADLINK      uint32 = 20
 	KCP_THRESH_INIT   uint32 = 2
 	KCP_THRESH_MIN    uint32 = 2
-	KCP_PROBE_INIT    uint32 = 7000   // 7 secs to probe window size
-	KCP_PROBE_LIMIT   uint32 = 120000 // up to 120 secs to probe window
+	KCP_PROBE_INIT    uint32 = 5000   // 5 secs to probe window size
+	KCP_PROBE_LIMIT   uint32 = 100000 // up to 100 secs to probe window
 	KCP_FASTACK_LIMIT uint32 = 5      // max times to trigger fastack
 )
 
