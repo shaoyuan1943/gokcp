@@ -226,7 +226,7 @@ func (kcp *KCP) Send(buffer []byte) error {
 			size = int(kcp.mss)
 		}
 
-		seg := getSegment()
+		seg := getSegment(kcp.mss)
 		seg.dataBuffer = seg.dataBuffer[:size]
 		copy(seg.dataBuffer, buffer[:size])
 		if kcp.streamMode {
@@ -506,7 +506,7 @@ func (kcp *KCP) Input(data []byte) error {
 			if timediff(sn, kcp.recvNext+kcp.recvWnd) < 0 {
 				kcp.pushACK(sn, ts)
 				if timediff(sn, kcp.recvNext) >= 0 {
-					seg := getSegment()
+					seg := getSegment(kcp.mss)
 					seg.dataBuffer = seg.dataBuffer[:length]
 					seg.convID = convID
 					seg.cmd = uint32(cmd)

@@ -3,15 +3,20 @@ package gokcp
 import "sync"
 
 var (
-	segmentPool = sync.Pool{New: func() interface{} {
-		s := &segment{}
-		s.dataBuffer = make([]byte, KCP_MTU_DEF)
-		s.dataBuffer = s.dataBuffer[:0]
-		return s
-	}}
+	segmentPool sync.Pool
 )
 
-func getSegment() *segment {
+// size is MSS
+func getSegment(size uint32) *segment {
+	if segmentPool.New == nil {
+		segmentPool.New = func() interface{} {
+			s := &segment{}
+			s.dataBuffer = make([]byte, int(size))
+			s.dataBuffer = s.dataBuffer[:0]
+			return s
+		}
+	}
+
 	return segmentPool.Get().(*segment)
 }
 
