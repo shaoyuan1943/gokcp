@@ -960,11 +960,11 @@ func (kcp *KCP) WaitSend() int {
 	return len(kcp.sendQueue) + len(kcp.sendBuffer)
 }
 
-func (kcp *KCP) Mtu() uint32 {
+func (kcp *KCP) MTU() uint32 {
 	return kcp.mtu
 }
 
-func (kcp *KCP) Mss() uint32 {
+func (kcp *KCP) MSS() uint32 {
 	return kcp.mss
 }
 
