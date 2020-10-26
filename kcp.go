@@ -869,8 +869,8 @@ func (kcp *KCP) SetMTU(mtu int) bool {
 func (kcp *KCP) SetInterval(interval int) {
 	if interval > 5000 {
 		interval = 5000
-	} else if interval < 10 {
-		interval = 10
+	} else if interval < 5 {
+		interval = 5
 	}
 
 	kcp.interval = uint32(interval)
